@@ -48,3 +48,29 @@ Join our community of developers creating universal apps.
 
 - [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
 - [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+
+KNOWN ERRORS
+_________________________________________________________________________________________________________
+
+/*
+FIX the NOBRIDGE ERROR:  
+(NOBRIDGE) ERROR  VirtualizedLists should never be nested inside plain ScrollViews with the same orientation because it can break windowing and other functionality - use another VirtualizedList-backed container instead. [Component Stack]
+(NOBRIDGE) ERROR  VirtualizedLists should never be nested inside plain ScrollViews with the same orientation because it can break windowing and other functionality - use another VirtualizedList-backed container instead. [Component Stack]
+
+_________________________________________________________________________________________________________
+
+
+FIXXX APPWRITE EXCEPTION{
+   FIX: changed the appwrite version from 0.7.1 to 0.7.0 in the package.json
+}
+
+_________________________________________________________________________________________________________
+
+
+TODO: 
+add save page
+
+
+{ fix text errors in movie deets page when clicked on }
+
+*/
