@@ -1,74 +1,141 @@
-import { Image, StyleSheet, Platform } from 'react-native';
+import {
+  View,
+  Text,
+  ActivityIndicator,
+  FlatList,
+  Image,
+} from "react-native";
 
-import { HelloWave } from '@/components/HelloWave';
-import ParallaxScrollView from '@/components/ParallaxScrollView';
-import { ThemedText } from '@/components/ThemedText';
-import { ThemedView } from '@/components/ThemedView';
+import { useRouter } from "expo-router";
+import useFetch from "@/services/useFetch";
+import { fetchMovies, fetchNowPlayingMovies } from "@/services/api";
+import { getTrendingMovies } from "@/services/appwrite";
+import { images } from "@/constants/images";
+import MovieCard from "@/components/MovieCard";
+import TrendingCard from "@/components/TrendingCard";
+import React from "react";
+import HeroPoster from "@/components/HeroPoster";
 
-export default function HomeScreen() {
+// Add memoized components
+const MemoizedMovieCard = React.memo(MovieCard);
+const MemoizedTrendingCard = React.memo(TrendingCard);
+const MemoizedHeroPoster = React.memo(HeroPoster);
+
+const Index = () => {
+  const router = useRouter();
+
+  const {
+    data: trendingMovies,
+    loading: trendingLoading,
+    error: trendingError,
+  } = useFetch(getTrendingMovies);
+
+  const {
+    data: nowPlayingMovies,
+    loading: nowPlayingLoading,
+    error: nowPlayingError,
+  } = useFetch(fetchNowPlayingMovies);
+
+  const {
+    data: movies,
+    loading: moviesLoading,
+    error: moviesError,
+  } = useFetch(() => fetchMovies({ query: "" }));
+
+  // Optimize list rendering
+  const renderMovie = React.useCallback(({ item, index }) => (
+    <MemoizedMovieCard {...item} key={`movie-${item.id}-${index}`} />
+  ), []);
+
+  const renderTrending = React.useCallback(({ item, index }) => (
+    <MemoizedTrendingCard
+      key={`trending-${item.movie_id}-${index}`}
+      movie={item}
+      index={index}
+    />
+  ), []);
+
+  // Optimize list header
+  const ListHeader = React.useCallback(() => (
+    <>
+      <View 
+        className="-mx-5" 
+        style={{
+          marginTop: -50,
+        }}
+      >
+        {nowPlayingMovies && (
+          <MemoizedHeroPoster movies={nowPlayingMovies} />
+        )}
+      </View>
+
+      {trendingMovies && (
+        <View className="mt-10">
+          <Text className="text-lg text-white font-bold mb-3">
+            Trending Movies
+          </Text>
+          <FlatList
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            className="mb-4 mt-3"
+            data={trendingMovies}
+            contentContainerStyle={{
+              gap: 26,
+            }}
+            renderItem={renderTrending}
+            keyExtractor={(item, index) => `trending-${item.movie_id}-${index}`}
+            removeClippedSubviews={true}
+            maxToRenderPerBatch={5}
+            windowSize={5}
+          />
+        </View>
+      )}
+
+      <Text className="text-lg text-white font-bold mt-5 mb-3">
+        Latest Releases
+      </Text>
+    </>
+  ), [nowPlayingMovies, trendingMovies, renderTrending]);
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12'
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-        <ThemedText>
-          Tap the Explore tab to learn more about what's included in this starter app.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          When you're ready, run{' '}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
-  );
-}
+    <View className="flex-1 bg-black">
+      <Image
+        source={images.bg1}
+        className="absolute w-full z-0"
+        resizeMode="cover"
+      />
 
-const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
-  },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
-  },
-});
+      {moviesLoading || trendingLoading || nowPlayingLoading ? (
+        <View className="flex-1 bg-primary justify-center items-center">
+          <ActivityIndicator size="large" color="#9486ab" className="mt-10" />
+        </View>
+      ) : moviesError || trendingError || nowPlayingError ? (
+        <Text>Error: {moviesError?.message || trendingError?.message || nowPlayingError?.message}</Text>
+      ) : (
+        <FlatList
+          className="px-5"
+          data={movies}
+          bounces={false}
+          overScrollMode="always"
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={6}
+          windowSize={5}
+          initialNumToRender={9}
+          ListHeaderComponent={ListHeader}
+          renderItem={renderMovie}
+          keyExtractor={(item, index) => `movie-${item.id}-${index}`}
+          numColumns={3}
+          columnWrapperStyle={{
+            justifyContent: "flex-start",
+            gap: 20,
+            paddingRight: 5,
+            marginBottom: 10,
+          }}
+          contentContainerStyle={{ paddingBottom: 32 }}
+        />
+      )}
+    </View>
+  );
+};
+
+export default React.memo(Index);
