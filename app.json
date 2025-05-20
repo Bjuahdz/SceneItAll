@@ -7,7 +7,6 @@
     "icon": "./assets/icons/logov2.png",
     "scheme": "movies",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true
     },
@@ -15,7 +14,9 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/icons/logov2.png",
         "backgroundColor": "#000000"
-      }
+      },
+      "permissions": [],
+      "package": "com.anonymous.SceneItAll"
     },
     "web": {
       "bundler": "metro",
@@ -32,7 +33,11 @@
           "resizeMode": "contain",
           "backgroundColor": "#0d100e"
         }
-      ]
+      ],
+      "react-native-video",
+      "expo-video",
+      "expo-font",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
