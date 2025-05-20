@@ -81,7 +81,7 @@ const MovieLogo = React.memo(({
   logoOpacity,
   logoTransform
 }: { 
-  logoPath: string | null,
+  logoPath: string | null | undefined,
   logoOpacity: Animated.AnimatedInterpolation<number>,
   logoTransform: {
     translateY: Animated.AnimatedInterpolation<number>,
@@ -107,7 +107,7 @@ const MovieLogo = React.memo(({
     >
       <View style={styles.logoWrapper}>
         <Image
-          source={{ uri: `https://image.tmdb.org/t/p/w500${logoPath}` }}
+          source={{ uri: `https://image.tmdb.org/t/p/w1280${logoPath}` }}
           style={[
             styles.logoImage,
             { width: logoSize.width, height: logoSize.height }
@@ -188,27 +188,39 @@ const TrendingCard = ({
   itemIndex,
   itemWidth
 }: ParallaxTrendingCardProps) => {
-  const { movie_id, title, poster_url } = movie;
+  const { movie_id, poster_url } = movie;
   const extendedMovie = movie as ExtendedTrendingMovie;
   
-  // Simplified parallax effect - only calculate for current card and adjacent cards
-  const inputRange = [
+  // Extended input range for smoother transitions
+  const extendedInputRange = [
+    (itemIndex - 2) * itemWidth,
     (itemIndex - 1) * itemWidth,
     itemIndex * itemWidth,
-    (itemIndex + 1) * itemWidth
+    (itemIndex + 1) * itemWidth,
+    (itemIndex + 2) * itemWidth
   ];
-  
-  // Scale animation: 0.92 when not active, 1 when active (reduced range for better performance)
-  const scale = scrollX.interpolate({
-    inputRange,
-    outputRange: [0.92, 1, 0.92],
+
+  // Calculate the scale factor for the poster to make it larger than the card
+  const POSTER_SCALE = 1.2; // Make the poster 40% larger than the card
+
+  // Add parallax effect for the poster image with extended range
+  const posterTranslateX = scrollX.interpolate({
+    inputRange: extendedInputRange,
+    outputRange: [-100, -50, 0, 50, 100], // Increased movement range
     extrapolate: 'clamp'
   });
-  
+
+  // Add vertical parallax effect with extended range
+  const posterTranslateY = scrollX.interpolate({
+    inputRange: extendedInputRange,
+    outputRange: [-20, -10, 0, 10, 20], // Increased vertical movement
+    extrapolate: 'clamp'
+  });
+
   // Card opacity animation (0.7 to 1 for better visibility)
   const opacity = scrollX.interpolate({
-    inputRange,
-    outputRange: [0.7, 1, 0.7],
+    inputRange: extendedInputRange,
+    outputRange: [0.7, 1, 1, 1, 0.7],
     extrapolate: 'clamp'
   });
   
@@ -247,7 +259,7 @@ const TrendingCard = ({
           style={[
             styles.container,
             {
-              transform: [{ scale }],
+              transform: [{ scale: opacity }],
               opacity
             }
           ]}
@@ -265,22 +277,36 @@ const TrendingCard = ({
           </View>
           
           <View style={styles.card}>
-            <Image
-              source={{ uri: extendedMovie.clean_poster_url || poster_url }}
-              style={styles.posterImage}
+            <Animated.Image
+              source={{ 
+                uri: (extendedMovie.clean_poster_url || poster_url).replace('/w500', '/w1280'),
+                cache: 'force-cache'
+              }}
+              style={[
+                styles.posterImage,
+                {
+                  transform: [
+                    { scale: POSTER_SCALE },
+                    { translateX: posterTranslateX },
+                    { translateY: posterTranslateY }
+                  ]
+                }
+              ]}
               resizeMode="cover"
               fadeDuration={0}
             />
             
-            {/* Top gradient to help logos stand out better */}
+            {/* Top gradient with extended coverage */}
             <LinearGradient
-              colors={['rgba(0,0,0,0.7)', 'transparent']}
+              colors={['rgba(0,0,0,0.8)', 'rgba(0,0,0,0.4)', 'transparent']}
+              locations={[0, 0.3, 0.6]}
               style={styles.topGradient}
             />
             
-            {/* Bottom gradient for better number visibility */}
+            {/* Bottom gradient with extended coverage */}
             <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.9)']}
+              colors={['transparent', 'rgba(0,0,0,0.4)', 'rgba(0,0,0,0.99)']}
+              locations={[0.4, 0.5, 0.9]}
               style={styles.bottomGradient}
             />
           </View>
@@ -328,7 +354,7 @@ const styles = StyleSheet.create({
   card: {
     width: CARD_WIDTH,
     height: CARD_HEIGHT,
-    borderRadius: 30, // Reduced from 60 to a more standard card radius
+    borderRadius: 30,
     overflow: 'hidden',
     position: 'relative',
     elevation: 10,
@@ -342,20 +368,25 @@ const styles = StyleSheet.create({
   posterImage: {
     width: '100%',
     height: '100%',
+    position: 'absolute',
+    top: 0,
+    left: 0,
   },
   topGradient: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    height: '30%',
+    left: -20, // Extend beyond left edge
+    right: -20, // Extend beyond right edge
+    top: -20, // Extend beyond top edge
+    height: '50%', // Increased height
+    zIndex: 1,
   },
   bottomGradient: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: '30%',
+    left: -20, // Extend beyond left edge
+    right: -20, // Extend beyond right edge
+    bottom: -20, // Extend beyond bottom edge
+    height: '50%', // Increased height
+    zIndex: 1,
   },
   rankingContainer: {
     position: 'absolute',
