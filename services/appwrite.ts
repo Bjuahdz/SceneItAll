@@ -60,8 +60,8 @@ export const getTrendingMovies = async (): Promise<
       }
     });
 
-    // Convert map values back to array and limit to 5 entries
-    const uniqueMovies = Array.from(movieMap.values()).slice(0, 5);
+    // Convert map values back to array and limit to 8 entries
+    const uniqueMovies = Array.from(movieMap.values()).slice(0, 8);
 
     return uniqueMovies as TrendingMovie[];
   } catch (error) {

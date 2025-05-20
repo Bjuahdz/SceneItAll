@@ -1,9 +1,11 @@
-import React, { useRef, useEffect } from 'react';
-import { Animated, Text } from 'react-native';
+import React from 'react';
+import { View, Text, StyleSheet } from 'react-native';
 
 interface GenreTagProps {
   genreId: number;
 }
+
+//now lets add a unique gradient effect similar to plex that has it based off the colors of the poster displayed. in our case we would want the gradient to be based off the movie poster in our hero section in the movie details page. 
 
 // Standard TMDB genre IDs and their corresponding names
 const genreMap: { [key: number]: string } = {
@@ -29,32 +31,31 @@ const genreMap: { [key: number]: string } = {
 };
 
 const GenreTag = ({ genreId }: GenreTagProps) => {
-  const scaleAnim = useRef(new Animated.Value(0)).current;
-  
-  useEffect(() => {
-    Animated.spring(scaleAnim, {
-      toValue: 1,
-      tension: 100,
-      friction: 5,
-      useNativeDriver: true,
-    }).start();
-  }, []);
-
   const genreName = genreMap[genreId];
+  
   if (!genreName) return null;
 
   return (
-    <Animated.View
-      className="px-3 py-1.5 rounded-full mr-2 mb-2 bg-[#9486ab]/20 border border-[#9486ab]/30"
-      style={{
-        transform: [{ scale: scaleAnim }],
-      }}
-    >
-      <Text className="text-[#9486ab] text-xs font-semibold">
-        {genreName}
-      </Text>
-    </Animated.View>
+    <View style={styles.container}>
+      <Text style={styles.text}>{genreName.toUpperCase()}</Text>
+    </View>
   );
 };
+
+const styles = StyleSheet.create({
+  container: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderBottomWidth: 1,
+    borderBottomColor: '#9ccadf',
+    marginHorizontal: 4,
+  },
+  text: {
+    color: '#9ccadf',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 1,
+  }
+});
 
 export default GenreTag;

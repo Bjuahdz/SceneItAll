@@ -1,31 +1,94 @@
-import { View, Animated, Dimensions, ActivityIndicator, Text, ImageBackground, Image, Platform, RefreshControl, ScrollView, TouchableOpacity } from 'react-native'
+import { View, Animated, Dimensions, ActivityIndicator, Text, Platform, RefreshControl, ScrollView, TouchableOpacity, StyleSheet } from 'react-native'
 import { BlurView } from 'expo-blur';
 import React, { useState, useRef, useEffect } from 'react'
 import { useLocalSearchParams } from 'expo-router';
 import useFetch from '@/services/useFetch';
-import { fetchMovieDetails, fetchMovieImages, fetchMovieLanguages } from '@/services/api';
+import { fetchMovieDetails, fetchMovieImages, fetchMovieLanguages, fetchMovieVideos } from '@/services/api';
 import { LinearGradient } from 'expo-linear-gradient';
-import MovieActionButtons from '@/components/MovieActionButtons';
-import MovieTabBar from '@/components/MovieTabBar';
+import MovieActionButtons from '@/components/moviedetails/MovieActionButtons';
+import MovieTabBar from '@/components/moviedetails/MovieTabBar';
+import TrailerPlayer from '../../components/TrailerPlayer';
+import { MovieVideo, TabType } from '@/interfaces/interfaces';
+import { Image } from 'expo-image'; // Changed to expo-image for better performance
+import * as Haptics from 'expo-haptics';
 
 // Add new memoized components to prevent unnecessary re-renders
 const MemoizedMovieActionButtons = React.memo(MovieActionButtons);
 const MemoizedMovieTabBar = React.memo(MovieTabBar);
 
+// Add image placeholder and blur hash for smooth loading
+const BLUR_HASH = '|rF?hV%2WCj[ayj[a|j[j[fQa{j[j[fQj[ayj[V?j[j[j[fQa{j[j[j[ayj[ayayayj[fQayj[j[j[';
+const PLACEHOLDER_COLOR = '#151312';
+
+// Constants for dimensions
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
 const MovieDetails = () => {
   const { id } = useLocalSearchParams();
-  const [images, setImages] = useState<{ backdrop: string | null, logo: string | null }>({ backdrop: null, logo: null });
+  const [images, setImages] = useState<{ 
+    backdrop: string | null, 
+    logo: string | null
+  }>({ 
+    backdrop: null, 
+    logo: null
+  });
   const scrollY = useRef(new Animated.Value(0)).current;
   const { data: movie, loading } = useFetch(() => fetchMovieDetails(id as string));
   const { height } = Dimensions.get('window');
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState('details');
-  const [isOverviewExpanded, setIsOverviewExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabType>('details');
+  const [showSynopsis, setShowSynopsis] = useState(false);
+  const [synopsisVisible, setSynopsisVisible] = useState(false);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [trailers, setTrailers] = useState<MovieVideo[]>([]);
+  const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
+  const [posterFetched, setPosterFetched] = useState(false);
+  const imageTransitionDuration = 0;
+  const [setIsOverviewExpanded] = useState(false);
   const synopsisRef = useRef<View>(null);
   const [synopsisHeight, setSynopsisHeight] = useState(0);
   const [isSynopsisExpanded, setIsSynopsisExpanded] = useState(false);
   const [isTextTruncated, setIsTextTruncated] = useState(false);
   const textRef = useRef(null);
+  const [headerHeight] = useState(Platform.select({
+    ios: 80,
+    android: 70,
+    default: 75
+  })); // Increased header height with platform-specific values
+  
+  // Calculate responsive sizes
+  const headerLogoHeight = headerHeight - 24; // Increased logo height
+  const headerLogoWidth = headerLogoHeight * 2.2; // Slightly wider ratio for better visibility
+  
+  // Add new animation values for header
+  const headerOpacity = useRef(new Animated.Value(0)).current;
+  const headerTranslateY = useRef(new Animated.Value(-headerHeight)).current;
+  
+  // Calculate when header should appear based on scroll position
+  const headerAnimation = scrollY.interpolate({
+    inputRange: [height * 0.4, height * 0.5],
+    outputRange: [0, 1],
+    extrapolate: 'clamp'
+  });
+
+  // Update header animations based on scroll
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(headerOpacity, {
+        toValue: headerAnimation,
+        duration: 0,
+        useNativeDriver: true,
+      }),
+      Animated.timing(headerTranslateY, {
+        toValue: headerAnimation.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-headerHeight, 0],
+        }),
+        duration: 0,
+        useNativeDriver: true,
+      })
+    ]).start();
+  }, [headerAnimation]);
   
   // Calculate scale based on scroll position
   const imageScale = scrollY.interpolate({
@@ -34,69 +97,189 @@ const MovieDetails = () => {
     extrapolate: 'clamp'
   });
   
-  // Fetch images when movie details are loaded
+  // Modify logo animation to fade out when header appears
+  const logoTransform = {
+    translateY: scrollY.interpolate({
+      inputRange: [0, height * 0.4, height * 0.5],
+      outputRange: [0, 0, 0],
+      extrapolate: 'clamp'
+    }),
+    opacity: scrollY.interpolate({
+      inputRange: [0, height * 0.4, height * 0.5],
+      outputRange: [1, 1, 0],
+      extrapolate: 'clamp'
+    })
+  };
+  
+  // Add rating animation to match logo
+  const ratingTransform = {
+    opacity: scrollY.interpolate({
+      inputRange: [0, height * 0.4, height * 0.5],
+      outputRange: [1, 1, 0],
+      extrapolate: 'clamp'
+    })
+  };
+  
+  // Debug the image fetching process
+  console.log("Current logo path:", images.logo);
+  
+  // Fetch images in parallel with movie details
   React.useEffect(() => {
-    const getImages = async () => {
-      if (movie?.id) {
-        const movieImages = await fetchMovieImages(movie.id.toString());
-        setImages({
-          backdrop: movieImages.backdrop || movie.backdrop_path,
-          logo: movieImages.logo
-        });
-      }
-    };
-    getImages();
-  }, [movie?.id]);
-
-  // Add refresh handler
-  const onRefresh = React.useCallback(async () => {
-    setRefreshing(true);
-    try {
-      if (movie?.id) {
-        const [movieData, movieImages] = await Promise.all([
-          fetchMovieDetails(movie.id.toString()),
-          fetchMovieImages(movie.id.toString())
-        ]);
-        
-        setImages({
-          backdrop: movieImages.backdrop || movieData.backdrop_path,
-          logo: movieImages.logo
-        });
-      }
-    } catch (error) {
-      console.error('Error refreshing:', error);
-    } finally {
-      setRefreshing(false);
+    if (id) {
+      // Start fetching images immediately
+      const fetchImageData = async () => {
+        try {
+          console.log("Fetching images for movie:", id);
+          const movieImages = await fetchMovieImages(id as string);
+          console.log("Received logo path:", movieImages.logo);
+          
+          // Only set images if they're not already set
+          if (!posterFetched) {
+            setImages({
+              backdrop: movieImages.backdrop,
+              logo: movieImages.logo
+            });
+            setPosterFetched(true);
+          }
+        } catch (error) {
+          console.error('Error fetching images:', error);
+        }
+      };
+      
+      fetchImageData();
     }
-  }, [movie?.id]);
+  }, [id]);
+  
+  // Use movie backdrop as fallback
+  React.useEffect(() => {
+    if (movie && !images.backdrop && movie.backdrop_path) {
+      setImages(prev => ({
+        ...prev,
+        backdrop: movie.backdrop_path
+      }));
+    }
+  }, [movie, images.backdrop]);
 
-  // Add this function to calculate collapse threshold
-  const calculateCollapseThreshold = (textLength: number, expanded: boolean) => {
-    if (!expanded) return height * 0.2; // Default threshold when not expanded
-    
-    // Base threshold on synopsis content length
-    const baseThreshold = height * 0.2;
-    const contentBasedThreshold = Math.min(
-      (textLength / 500) * height * 0.3, // Adjust threshold based on text length
-      height * 0.5 // Maximum threshold
-    );
-    
-    return Math.max(baseThreshold, contentBasedThreshold);
+  // Custom refresh handler for synopsis
+  const onRefresh = React.useCallback(async () => {
+    if (!synopsisVisible && !isAnimating) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+      setShowSynopsis(true);
+      setSynopsisVisible(true);
+      Animated.parallel([
+        Animated.spring(synopsisTranslateY, {
+          toValue: 0,
+          useNativeDriver: true,
+          tension: 50,
+          friction: 7
+        }),
+        Animated.timing(synopsisOpacity, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true
+        })
+      ]).start();
+    }
+  }, [synopsisVisible, isAnimating]);
+
+  // Add handler for synopsis tab click
+  const handleSynopsisTabClick = () => {
+    if (synopsisVisible && !isAnimating) {
+      setIsAnimating(true);
+      Animated.parallel([
+        Animated.spring(synopsisTranslateY, {
+          toValue: -100,
+          useNativeDriver: true,
+          tension: 50,
+          friction: 7
+        }),
+        Animated.timing(synopsisOpacity, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true
+        })
+      ]).start(() => {
+        setSynopsisVisible(false);
+        setShowSynopsis(false);
+        setIsAnimating(false);
+      });
+    }
   };
 
-  // Modify the synopsisTranslateY interpolation to create a smoother slide-up effect
-  const synopsisTranslateY = scrollY.interpolate({
-    inputRange: [0, height * 0.2],
-    outputRange: [0, -height * 0.2],
-    extrapolate: 'clamp'
-  });
+  // Add these state handlers
+  const [isLiked, setIsLiked] = useState(false);
+  const [isDisliked, setIsDisliked] = useState(false);
+  const [isFavorite, setIsFavorite] = useState(false);
 
-  // Update the contentTranslateY to move up more gradually
-  const contentTranslateY = scrollY.interpolate({
-    inputRange: [0, height * 0.2],
-    outputRange: [0, -height * 0.2],
-    extrapolate: 'clamp'
-  });
+  // Add these handlers
+  const handleLike = () => {
+    setIsLiked(!isLiked);
+    if (isDisliked) setIsDisliked(false);
+  };
+
+  const handleDislike = () => {
+    setIsDisliked(!isDisliked);
+    if (isLiked) setIsLiked(false);
+  };
+
+  const handleFavorite = () => {
+    setIsFavorite(!isFavorite);
+  };
+
+  const handleWatch = () => {
+    // Implement watch functionality
+    console.log('Watch movie:', movie?.id);
+  };
+
+  const handleTrailerPress = () => {
+    if (trailers.length > 0) {
+      setSelectedVideo(trailers[trailers.length - 1].key);
+    }
+  };
+
+  const handleCloseVideo = () => {
+    setSelectedVideo(null);
+  };
+
+  // Optimize image loading
+  const imageUri = React.useMemo(() => {
+    if (!images.backdrop && !movie?.backdrop_path) return null;
+    return `https://image.tmdb.org/t/p/w1280${images.backdrop || movie?.backdrop_path}`;
+  }, [images.backdrop, movie?.backdrop_path]);
+  
+  // Generate logo URI
+  const logoUri = React.useMemo(() => {
+    if (!images.logo) return null;
+    return `https://image.tmdb.org/t/p/w500${images.logo}`;
+  }, [images.logo]);
+
+  // Animation values
+  const cardOpacity = useRef(new Animated.Value(1)).current; // Start visible
+  const contentOpacity = useRef(new Animated.Value(0)).current;
+  
+  // Only animate content when movie is loaded
+  useEffect(() => {
+    if (movie) {
+      Animated.timing(contentOpacity, {
+        toValue: 1,
+        duration: 400,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [movie]);
+
+  useEffect(() => {
+    const loadTrailers = async () => {
+      try {
+        const fetchedTrailers = await fetchMovieVideos(id as string);
+        setTrailers(fetchedTrailers);
+      } catch (error) {
+        console.error('Error loading trailers:', error);
+      }
+    };
+
+    loadTrailers();
+  }, [id]);
 
   useEffect(() => {
     if (movie?.overview) {
@@ -131,82 +314,15 @@ const MovieDetails = () => {
     return lineCount > 4;
   };
 
-  // Add these state handlers
-  const [isLiked, setIsLiked] = useState(false);
-  const [isDisliked, setIsDisliked] = useState(false);
-  const [isFavorite, setIsFavorite] = useState(false);
-
-  // Add these handlers
-  const handleLike = () => {
-    setIsLiked(!isLiked);
-    if (isDisliked) setIsDisliked(false);
+  // Add this new handler
+  const handleStateChange = (newState: { isLiked: boolean; isDisliked: boolean; isFavorite: boolean }) => {
+    setIsLiked(newState.isLiked);
+    setIsDisliked(newState.isDisliked);
+    setIsFavorite(newState.isFavorite);
   };
 
-  const handleDislike = () => {
-    setIsDisliked(!isDisliked);
-    if (isLiked) setIsLiked(false);
-  };
-
-  const handleFavorite = () => {
-    setIsFavorite(!isFavorite);
-  };
-
-  const handleWatch = () => {
-    // Implement watch functionality
-    console.log('Watch movie:', movie?.id);
-  };
-
-  const handleTrailer = () => {
-    // Implement trailer functionality
-    console.log('Show trailer for movie:', movie?.id);
-  };
-
-  // Add a new ref to track if we're currently animating
-  const isAnimating = useRef(false);
-
-  // Update animation config
-  const animationConfig = React.useMemo(() => ({
-    // Initial pause before any animations start
-    // Lower (0-30): Immediate start
-    // Default (50): Slight pause
-    // Higher (100-200): More dramatic pause
-    initialDelay: 50,
-
-    // Duration for movie card/poster fade in
-    // Lower (300-400): Quick, snappy appearance
-    // Default (500): Smooth fade
-    // Higher (600-800): Slower, more dramatic reveal
-    cardDuration: 500,
-
-    // Pause between card fade-in completing and secondary elements starting
-    // (synopsis, action buttons, and tab bar)
-    // Lower (100): Quick succession
-    // Default (200): Clear separation
-    // Higher (300-500): More pronounced stagger effect
-    contentDelay: 100,
-
-    // How long secondary elements take to fade in
-    // (controls fade duration of synopsis, buttons, and tab bar together)
-    // Lower (300): Quick pop-in
-    // Default (400): Smooth reveal
-    // Higher (500-600): Gradual appearance
-    contentDuration: 400,
-  }), []);
-
-  // Optimize interpolations using useMemo
+  // Optimize the synopsis and tabBar styles
   const animatedStyles = React.useMemo(() => ({
-    synopsis: {
-      opacity: scrollY.interpolate({
-        inputRange: [0, height * 0.1, height * 0.2],
-        outputRange: [1, 0.5, 0],
-        extrapolate: 'clamp'
-      }),
-      translateY: scrollY.interpolate({
-        inputRange: [0, height * 0.2],
-        outputRange: [0, -height * 0.2],
-        extrapolate: 'clamp'
-      })
-    },
     tabBar: {
       opacity: scrollY.interpolate({
         inputRange: [-50, 0, 100],
@@ -221,76 +337,14 @@ const MovieDetails = () => {
     }
   }), [scrollY, height]);
 
-  // Optimize image loading
-  const imageUri = React.useMemo(() => 
-    `https://image.tmdb.org/t/p/w1280${images.backdrop || movie?.backdrop_path}`,
-    [images.backdrop, movie?.backdrop_path]
-  );
+  // Add animation value for synopsis
+  const synopsisTranslateY = useRef(new Animated.Value(-100)).current;
+  const synopsisOpacity = useRef(new Animated.Value(0)).current;
+  
+  // Add back the mainScrollViewRef
+  const mainScrollViewRef = useRef<ScrollView>(null);
 
-  // Update the animation sequence
-  useEffect(() => {
-    if (!movie?.id) return;
-
-    // Reset opacities
-    cardOpacity.setValue(0);
-    contentOpacity.setValue(0);
-
-    const timeout = setTimeout(() => {
-      // First animate the card
-      Animated.timing(cardOpacity, {
-        toValue: 1,
-        duration: animationConfig.cardDuration,
-        useNativeDriver: true,
-      }).start(({ finished }) => {
-        // Only start content animation after card animation is complete
-        if (finished) {
-          setTimeout(() => {
-            Animated.timing(contentOpacity, {
-              toValue: 1,
-              duration: animationConfig.contentDuration,
-              useNativeDriver: true,
-            }).start();
-          }, animationConfig.contentDelay);
-        }
-      });
-    }, animationConfig.initialDelay);
-
-    return () => clearTimeout(timeout);
-  }, [movie?.id, animationConfig]);
-
-  // Optimize scroll handler
-  const handleScroll = React.useCallback(
-    Animated.event(
-      [{ nativeEvent: { contentOffset: { y: scrollY } }}],
-      { 
-        useNativeDriver: true,
-        listener: (event: any) => {
-          if (!isSynopsisExpanded || isAnimating.current) return;
-
-          const offsetY = event.nativeEvent.contentOffset.y;
-          const collapseThreshold = calculateCollapseThreshold(
-            movie?.overview?.length || 0,
-            isSynopsisExpanded
-          );
-          
-          if (offsetY > collapseThreshold) {
-            isAnimating.current = true;
-            setIsSynopsisExpanded(false);
-            setTimeout(() => {
-              isAnimating.current = false;
-            }, 300);
-          }
-        }
-      }
-    ),
-    [isSynopsisExpanded, movie?.overview?.length]
-  );
-
-  // Add these near the top with other state declarations
-  const cardOpacity = useRef(new Animated.Value(0)).current;
-  const contentOpacity = useRef(new Animated.Value(0)).current;
-
-  if (loading) {
+  if (loading && !imageUri) {
     return (
       <View className="bg-primary flex-1 justify-center items-center">
         <ActivityIndicator size="large" color="#9486ab" />
@@ -298,53 +352,234 @@ const MovieDetails = () => {
     );
   }
 
-  if (!movie) {
-    return (
-      <View className="bg-primary flex-1 justify-center items-center">
-        <Text className="text-white">Movie not found</Text>
-      </View>
-    );
-  }
-
   return (
     <View className="flex-1 bg-black">
-      <ImageBackground
-        source={{uri: `https://image.tmdb.org/t/p/w1280${movie?.backdrop_path}`}}
-        className="flex-1"
-        resizeMode="cover"
+      {/* Add Sticky Header */}
+      <Animated.View
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: headerHeight,
+          backgroundColor: 'rgba(0,0,0,0.95)',
+          zIndex: 1000,
+          opacity: headerOpacity,
+          transform: [{ translateY: headerTranslateY }],
+          borderBottomWidth: 1,
+          borderBottomColor: 'rgba(255,255,255,0.1)',
+          paddingTop: Platform.OS === 'ios' ? 20 : 0, // Add padding for iOS status bar
+        }}
       >
-        <View className="absolute w-full h-full bg-black/70" />
-        
-        <BlurView intensity={30} tint="dark" className="flex-1">
+        <View style={{
+          flex: 1,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          paddingHorizontal: 16,
+        }}>
+          <View style={{ 
+            flex: 1,
+            marginRight: 12, // Add margin to prevent overlap with rating
+          }}>
+            {logoUri ? (
+              <Image
+                source={{ uri: logoUri }}
+                style={{
+                  height: headerLogoHeight,
+                  width: headerLogoWidth,
+                  resizeMode: 'contain',
+                }}
+                contentFit="contain"
+                transition={0}
+                cachePolicy="memory-disk"
+              />
+            ) : (
+              <Text
+                style={{
+                  color: 'white',
+                  fontSize: Platform.select({
+                    ios: 20,
+                    android: 18,
+                    default: 19
+                  }),
+                  fontWeight: 'bold',
+                }}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+              >
+                {movie?.title}
+              </Text>
+            )}
+          </View>
+          
+          {/* Rating in header */}
+          {movie?.vote_average !== undefined && (
+            <View style={{
+              backgroundColor: 'rgba(0,0,0,0.75)',
+              borderRadius: 10,
+              paddingHorizontal: 8,
+              paddingVertical: 6,
+              flexDirection: 'row',
+              alignItems: 'center',
+              minWidth: 65, // Ensure minimum width for rating
+            }}>
+              <Text style={{
+                color: movie.vote_average >= 7 ? '#4ade80' : 
+                      movie.vote_average >= 5 ? '#FFAE42' : '#ef4444',
+                fontSize: Platform.select({
+                  ios: 16,
+                  android: 15,
+                  default: 15.5
+                }),
+                fontWeight: '700',
+                marginRight: 2,
+              }}>
+                {movie.vote_average.toFixed(1)}
+              </Text>
+              <Text style={{
+                color: 'rgba(255,255,255,0.6)',
+                fontSize: Platform.select({
+                  ios: 12,
+                  android: 11,
+                  default: 11.5
+                }),
+                fontWeight: '600',
+                marginTop: 1,
+              }}>
+                /10
+              </Text>
+            </View>
+          )}
+        </View>
+      </Animated.View>
+
       <Animated.ScrollView
-        onScroll={handleScroll}
+        ref={mainScrollViewRef}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollY } }}],
+          { useNativeDriver: true }
+        )}
         scrollEventThrottle={16}
         bounces={true}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
-              paddingTop: height * 0.1,
-              paddingHorizontal: 20,
-              paddingBottom: 20,
+          paddingBottom: 20,
         }}
         overScrollMode="never"
         refreshControl={
           <RefreshControl
-            refreshing={refreshing}
+            refreshing={false}
             onRefresh={onRefresh}
-            tintColor="#9486ab"
-            colors={['#9486ab']}
-            progressBackgroundColor="#151312"
+            tintColor="transparent"
+            colors={['transparent']}
+            progressBackgroundColor="transparent"
             style={{ backgroundColor: 'transparent' }}
             progressViewOffset={height * 0.1}
           />
         }
       >
-        {/* Main Container with Hero Card */}
+        {/* Synopsis Section - Only visible when pulled down */}
+        {showSynopsis && (
+          <Animated.View
+            style={{
+              position: 'absolute',
+              top: 85,
+              left: 16,
+              right: 16,
+              backgroundColor: 'rgba(15,15,20,0.98)',
+              padding: 16,
+              paddingTop: 20,
+              zIndex: 1000,
+              transform: [{
+                translateY: synopsisTranslateY
+              }],
+              opacity: synopsisOpacity,
+              borderRadius: 20,
+              shadowColor: '#000',
+              shadowOffset: {
+                width: 0,
+                height: 8,
+              },
+              shadowOpacity: 0.4,
+              shadowRadius: 12,
+              elevation: 12,
+              borderWidth: 1,
+              borderColor: 'rgba(255,255,255,0.08)',
+              overflow: 'hidden',
+              maxHeight: '60%',
+            }}
+          >
+            {/* Background Gradient */}
+            <LinearGradient
+              colors={['rgba(148,134,171,0.1)', 'rgba(148,134,171,0.05)', 'transparent']}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                height: '100%',
+                opacity: 0.5,
+              }}
+            />
+
+            {movie?.overview && (
+              <View>
+                <Text style={{
+                  color: 'rgba(255,255,255,0.85)',
+                  fontSize: 14,
+                  lineHeight: 20,
+                  textAlign: 'justify',
+                  letterSpacing: 0.2,
+                }}>
+                  {movie.overview}
+                </Text>
+              </View>
+            )}
+
+            {/* Synopsis Label Button */}
+            <TouchableOpacity
+              onPress={handleSynopsisTabClick}
+              style={{
+                marginTop: 16,
+                alignItems: 'center',
+                paddingVertical: 8,
+              }}
+            >
+              <View style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <View style={{
+                  width: 40,
+                  height: 1,
+                  backgroundColor: 'rgba(255,255,255,0.2)',
+                }} />
+                <Text style={{
+                  color: 'rgba(255,255,255,0.7)',
+                  fontSize: 14,
+                  fontWeight: '600',
+                  letterSpacing: 0.5,
+                  paddingHorizontal: 12,
+                }}>
+                  Synopsis
+                </Text>
+                <View style={{
+                  width: 40,
+                  height: 1,
+                  backgroundColor: 'rgba(255,255,255,0.2)',
+                }} />
+              </View>
+            </TouchableOpacity>
+          </Animated.View>
+        )}
+
+        {/* Hero Section */}
         <View style={{
           position: 'relative',
           width: '100%',
-          height: height * 0.3,
-          borderRadius: 24,
+          height: height * 0.7,
           zIndex: 2,
         }}>
           <Animated.View 
@@ -355,318 +590,216 @@ const MovieDetails = () => {
               opacity: cardOpacity,
             }}
           >
-          {/* Static Card */}
-          <View style={{
-            position: 'absolute',
-            width: '100%',
-            height: '100%',
-            borderRadius: 24,
-            backgroundColor: 'rgba(0,0,0,0.4)',
-            overflow: 'hidden',
-            zIndex: 2,
-          }}>
-          <Animated.Image 
-              source={{uri: `https://image.tmdb.org/t/p/w1280${images.backdrop || movie.backdrop_path}`}}
-              style={[{
-                width: '100%',
-                height: '100%',
-                transform: [{ scale: imageScale }],
-              }]}
-            resizeMode="cover"
-          />
-
-              {/* Logo Section */}
-            {images.logo && (
-              <View style={{
-                position: 'absolute',
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: 120,
-              }}>
-                <LinearGradient
-                  colors={[
-                    'transparent',
-                    'rgba(0,0,0,0.6)',
-                    'rgba(0,0,0,0.8)'
-                  ]}
+            {/* Movie Backdrop */}
+            <View style={{
+              position: 'absolute',
+              width: '100%',
+              height: '100%',
+              backgroundColor: 'rgba(0,0,0,0.3)',
+              overflow: 'hidden',
+              zIndex: 2,
+            }}>
+              {imageUri ? (
+                <Animated.View
                   style={{
-                    position: 'absolute',
                     width: '100%',
                     height: '100%',
+                    transform: [{ scale: imageScale }],
                   }}
-                />
-                
-                <View style={{
-                  position: 'absolute',
-                  bottom: 20,
-                  left: 0,
-                  right: 0,
-                  alignItems: 'center',
-                }}>
-                  <Image
-                    source={{ uri: `https://image.tmdb.org/t/p/w500${images.logo}` }}
-                    style={{
-                      width: '70%',
-                      height: 60,
-                      shadowColor: '#fff',
-                      shadowOffset: { width: 0, height: 2 },
-                      shadowOpacity: 0.2,
-                      shadowRadius: 5,
-                      ...Platform.select({
-                        android: {
-                          elevation: 5,
-                        },
-                        ios: {
-                          shadowColor: '#fff',
-                          shadowOffset: { width: 0, height: 2 },
-                          shadowOpacity: 0.25,
-                          shadowRadius: 3.84,
-                        },
-                      }),
-                    }}
-                    resizeMode="contain"
+                >
+                  <Image 
+                    source={{uri: imageUri}}
+                    style={{width: '100%', height: '100%'}}
+                    contentFit="cover"
+                    transition={imageTransitionDuration}
+                    cachePolicy="memory-disk"
                   />
-            </View>
-              </View>
-            )}
-
-              {/* Add Rating Badge */}
-              <View style={{
-                position: 'absolute',
-                top: 16,
-                right: 16,
-                backgroundColor: 'rgba(0,0,0,0.75)',
-                borderRadius: 8,
-                paddingHorizontal: 6,
-                paddingVertical: 4,
-                flexDirection: 'row',
-                alignItems: 'center',
-                borderWidth: 1,
-                borderColor: movie.vote_average >= 7 ? 'rgba(74, 222, 128, 0.5)' :
-                            movie.vote_average >= 5 ? 'rgba(255, 174, 66, 0.5)' :
-                            'rgba(239, 68, 68, 0.5)',
-              }}>
-                <Text style={{
-                  color: movie.vote_average >= 7 ? '#4ade80' : 
-                        movie.vote_average >= 5 ? '#FFAE42' : '#ef4444',
-                  fontSize: 14,
-                  fontWeight: '700',
-                  marginRight: 1,
-                }}>
-                  {movie.vote_average.toFixed(1)}
-                </Text>
-                <Text style={{
-                  color: 'rgba(255,255,255,0.6)',
-                  fontSize: 10,
-                  fontWeight: '600',
-                  marginTop: 1,
-                }}>
-                  /10
-                </Text>
-              </View>
-          </View>
-
-          {/* Static Gradient Border */}
-          <View 
-            style={{
-              position: 'absolute',
-              top: -4,
-              left: -4,
-              right: -4,
-              bottom: -4,
-              borderRadius: 24,
-              zIndex: 1,
-              shadowColor: '#9ccadf',
-              shadowOffset: { width: 0, height: 0 },
-              shadowOpacity: 0.5,
-              shadowRadius: 15,
-              elevation: 10,
-            }}
-          >
-            <LinearGradient
-              colors={[
-                'rgba(148, 134, 171, 0.8)',
-                'rgba(156, 202, 223, 0.8)',
-                'rgba(148, 134, 171, 0.8)'
-              ]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={{
-                width: '100%',
-                height: '100%',
-                borderRadius: 24,
-              }}
-            />
-          </View>
-
-          {/* Static Shadow */}
-          <View style={{
-            position: 'absolute',
-            width: '100%',
-            height: '100%',
-            borderRadius: 24,
-            backgroundColor: 'transparent',
-            shadowColor: '#fff',
-            shadowOffset: { width: 0, height: 0 },
-            shadowOpacity: 0.3,
-            shadowRadius: 20,
-            elevation: 15,
-            zIndex: 0,
-          }} />
-          </Animated.View>
-            </View>
-
-        {/* Synopsis Section */}
-        <Animated.View 
-          style={{
-            marginTop: 15,
-            marginHorizontal: 20,
-            opacity: Animated.multiply(
-              contentOpacity,
-              animatedStyles.synopsis.opacity
-            ),
-            transform: [{ 
-              translateY: animatedStyles.synopsis.translateY
-            }],
-            zIndex: 1,
-          }}
-        >
-          <LinearGradient
-            colors={[
-              'rgba(156, 202, 223, 0.1)',
-              'rgba(148, 134, 171, 0.05)',
-            ]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={{
-              borderRadius: 16,
-              padding: 16,
-              position: 'relative',
-            }}
-          >
-            <View 
-              ref={synopsisRef}
-              onLayout={(event) => {
-                const { height } = event.nativeEvent.layout;
-                setSynopsisHeight(height);
-              }}
-              style={{ flex: 1 }}
-            >
-              {movie.tagline && (
-                <Text style={{
-                  color: '#9ccadf',
-                  fontSize: 14,
-                  fontStyle: 'italic',
-                  marginBottom: 8,
-                  opacity: 0.9,
-                }}>
-                  "{movie.tagline}"
-                </Text>
-              )}
-              <Text 
-                style={{
-                  color: 'rgba(255,255,255,0.9)',
-                  fontSize: 15,
-                  lineHeight: 24,
-                  textAlign: 'justify',
-                  marginBottom: 24,
-                }}
-                numberOfLines={isSynopsisExpanded ? undefined : 4}
-              >
-                {movie.overview}
-              </Text>
-              
-              {/* Bottom border with Synopsis button */}
-              <View style={{
-                position: 'absolute',
-                bottom: 0,
-                left: 16,
-                right: 16,
-                height: 3,
-                backgroundColor: '#9ccadf',
-                opacity: 0.7,
-                borderRadius: 1.5,
-              }} />
-              
-              <TouchableOpacity
-                onPress={() => {
-                  if (!isAnimating.current) {
-                    setIsSynopsisExpanded(!isSynopsisExpanded);
-                  }
-                }}
-                style={{
-                  position: 'absolute',
-                  bottom: -10,
-                  left: 0,
-                  right: 0,
-                  alignItems: 'center',
-                }}
-                activeOpacity={0.7}
-              >
+                  
+                  {/* Top dark gradient for logo visibility */}
+                  <LinearGradient
+                    colors={['rgba(0,0,0,0.8)', 'transparent', 'transparent']}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      height: '60%',
+                    }}
+                  />
+                  
+                  {/* Bottom dark gradient for better text visibility */}
+                  <LinearGradient
+                    colors={['transparent', 'rgba(0,0,0,0.9)']}
+                    style={{
+                      position: 'absolute',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      height: '30%',
+                    }}
+                  />
+                </Animated.View>
+              ) : (
                 <View style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 4,
-                  backgroundColor: 'rgba(0,0,0,0.8)',
-                  borderRadius: 10,
-                  borderWidth: 1,
-                  borderColor: 'rgba(156, 202, 223, 0.3)',
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minWidth: 100,
-                }}>
+                  width: '100%',
+                  height: '100%',
+                  backgroundColor: PLACEHOLDER_COLOR
+                }} />
+              )}
+
+              {/* Simple floating logo */}
+              {logoUri && (
+                <Animated.View style={[
+                  styles.logoContainer,
+                  {
+                    transform: [{ translateY: logoTransform.translateY }],
+                    opacity: logoTransform.opacity
+                  }
+                ]}>
+                  <Image
+                    source={{ uri: logoUri }}
+                    style={styles.logoImage}
+                    contentFit="contain"
+                    transition={0}
+                    cachePolicy="memory-disk"
+                  />
+                  {movie?.tagline && (
+                    <Text style={{
+                      color: 'rgba(255,255,255,0.9)',
+                      fontSize: 14,
+                      fontStyle: 'italic',
+                      textAlign: 'center',
+                      marginTop: 12,
+                      maxWidth: SCREEN_WIDTH * 0.8,
+                      textShadowColor: 'rgba(0, 0, 0, 0.75)',
+                      textShadowOffset: { width: 0, height: 1 },
+                      textShadowRadius: 2,
+                    }}>
+                      "{movie.tagline}"
+                    </Text>
+                  )}
                   <Text style={{
-                    color: '#9ccadf',
+                    color: 'rgba(255,255,255,0.6)',
                     fontSize: 12,
                     fontWeight: '600',
+                    textAlign: 'center',
+                    marginTop: 8,
                     letterSpacing: 0.5,
                   }}>
-                    SYNOPSIS
-              </Text>
-                  {movie.overview && isSynopsisLong(movie.overview) && (
-                    <View style={{
-                      width: 16,
-                      height: 16,
-                      borderRadius: 8,
-                      backgroundColor: 'rgba(156, 202, 223, 0.15)',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      marginLeft: 6,
-                    }}>
-                      <Text style={{
-                        color: '#9ccadf',
-                        fontSize: 14,
-                        fontWeight: '400',
-                        lineHeight: 16,
-                        textAlign: 'center',
-                      }}>
-                        {isSynopsisExpanded ? '−' : '+'}
-              </Text>
-            </View>
-                  )}
-                </View>
-              </TouchableOpacity>
-            </View>
-          </LinearGradient>
-        </Animated.View>
+                    Pull down for synopsis
+                  </Text>
+                </Animated.View>
+              )}
 
-        {/* Container for content that slides up */}
-        <Animated.View style={{
-          opacity: contentOpacity,
-          transform: [{ 
-            translateY: contentTranslateY
-          }],
+              {/* Add movie title for cases where logo isn't available */}
+              {!logoUri && movie?.title && (
+                <Animated.View style={{
+                  position: 'absolute',
+                  bottom: 20,
+                  left: 20,
+                  right: 20,
+                  opacity: logoTransform.opacity,
+                }}>
+                  <LinearGradient
+                    colors={[
+                      'transparent',
+                      'rgba(0,0,0,0.75)',
+                      'rgba(0,0,0,0.95)'
+                    ]}
+                    style={{
+                      position: 'absolute',
+                      bottom: -20,
+                      left: -20,
+                      right: -20,
+                      height: 100,
+                    }}
+                  />
+                  <Text
+                    style={{
+                      color: 'white',
+                      fontSize: 24,
+                      fontWeight: 'bold',
+                      textShadowColor: 'rgba(0, 0, 0, 0.75)',
+                      textShadowOffset: { width: 0, height: 2 },
+                      textShadowRadius: 4
+                    }}
+                  >
+                    {movie.title}
+                  </Text>
+                  {movie?.tagline && (
+                    <Text style={{
+                      color: 'rgba(255,255,255,0.9)',
+                      fontSize: 14,
+                      fontStyle: 'italic',
+                      marginTop: 8,
+                      textShadowColor: 'rgba(0, 0, 0, 0.75)',
+                      textShadowOffset: { width: 0, height: 1 },
+                      textShadowRadius: 2,
+                    }}>
+                      "{movie.tagline}"
+                    </Text>
+                  )}
+                  <Text style={{
+                    color: 'rgba(255,255,255,0.6)',
+                    fontSize: 12,
+                    fontWeight: '600',
+                    marginTop: 8,
+                    letterSpacing: 0.5,
+                  }}>
+                    Pull down for synopsis
+                  </Text>
+                </Animated.View>
+              )}
+              
+              {/* Rating Badge on Poster */}
+              {movie?.vote_average !== undefined && (
+                <Animated.View style={{
+                  position: 'absolute',
+                  top: Platform.OS === 'ios' ? 50 : 16,
+                  right: 16,
+                  backgroundColor: 'rgba(0,0,0,0.75)',
+                  borderRadius: 10,
+                  paddingHorizontal: 8,
+                  paddingVertical: 6,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  opacity: ratingTransform.opacity,
+                  transform: [{ scale: 1.1 }], // Slightly larger on poster
+                }}>
+                  <Text style={{
+                    color: movie.vote_average >= 7 ? '#4ade80' : 
+                          movie.vote_average >= 5 ? '#FFAE42' : '#ef4444',
+                    fontSize: 16,
+                    fontWeight: '700',
+                    marginRight: 2,
+                  }}>
+                    {movie.vote_average.toFixed(1)}
+                  </Text>
+                  <Text style={{
+                    color: 'rgba(255,255,255,0.6)',
+                    fontSize: 12,
+                    fontWeight: '600',
+                    marginTop: 1,
+                  }}>
+                    /10
+                  </Text>
+                </Animated.View>
+              )}
+            </View>
+          </Animated.View>
+        </View>
+
+        {/* Container for content */}
+        <View style={{
           zIndex: 2,
+          marginTop: 8, // Reduced top margin
         }}>
           {/* Movie Action Buttons */}
           <View style={{ 
-            marginTop: 16,
-            marginBottom: 8,
             paddingHorizontal: 20,
           }}>
             <MemoizedMovieActionButtons
-              movieId={movie?.id}
+              movieId={id}
               isLiked={isLiked}
               isDisliked={isDisliked}
               isFavorite={isFavorite}
@@ -674,33 +807,69 @@ const MovieDetails = () => {
               onDislike={handleDislike}
               onFavorite={handleFavorite}
               onWatch={handleWatch}
-              onTrailer={handleTrailer}
+              onTrailer={handleTrailerPress}
+              hasTrailer={trailers.length > 0}
+              onStateChange={handleStateChange}
             />
           </View>
 
           {/* Update TabBar container spacing */}
           <Animated.View style={{
             marginTop: 8,
-          opacity: animatedStyles.tabBar.opacity,
-          transform: [{
-            translateY: animatedStyles.tabBar.translateY
+            opacity: animatedStyles.tabBar.opacity,
+            transform: [{
+              translateY: animatedStyles.tabBar.translateY
             }],
           }}>
-            <MemoizedMovieTabBar
-              activeTab={activeTab}
-              setActiveTab={setActiveTab}
-              movie={movie}
-            />
+            {movie && (
+              <MemoizedMovieTabBar
+                activeTab={activeTab}
+                setActiveTab={setActiveTab}
+                movie={movie}
+                onTrailerSelect={(videoKey) => setSelectedVideo(videoKey)}
+                selectedVideo={selectedVideo}
+                onCloseVideo={handleCloseVideo}
+                scrollViewRef={mainScrollViewRef}
+              />
+            )}
           </Animated.View>
+        </View>
 
-          {/* Rest of the content */}
-          {/* ... */}
-        </Animated.View>
+        {/* Trailer Player */}
+        <TrailerPlayer
+          videoId={selectedVideo}
+          onClose={handleCloseVideo}
+          rating={movie?.certification || 'NR'}
+        />
       </Animated.ScrollView>
-        </BlurView>
-      </ImageBackground>
     </View>
   );
 };
+
+// Remove unused styles and state
+const styles = StyleSheet.create({
+  logoContainer: {
+    position: 'absolute',
+    bottom: 40,
+    left: 0,
+    right: 0,
+    height: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+  },
+  logoImage: {
+    width: SCREEN_WIDTH * 0.7,
+    height: 100,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 10,
+    },
+    shadowOpacity: 0.9,
+    shadowRadius: 15,
+    elevation: 20,
+  }
+});
 
 export default React.memo(MovieDetails);
