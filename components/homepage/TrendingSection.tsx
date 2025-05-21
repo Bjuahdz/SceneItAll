@@ -30,9 +30,8 @@ const CARD_WIDTH = SCREEN_WIDTH * 0.7;
 const SPACING = 20;
 const ITEM_WIDTH = CARD_WIDTH + SPACING;
 
-// Adjusted padding values to correct the centering
-const LEFT_PADDING = (SCREEN_WIDTH - CARD_WIDTH) / 2;
-const RIGHT_PADDING = (SCREEN_WIDTH - CARD_WIDTH) / 2 + 40; // Add extra padding on right
+// Calculate padding to center the cards
+const HORIZONTAL_PADDING = (SCREEN_WIDTH - CARD_WIDTH) / 2;
 
 // App's primary color theme
 const PRIMARY_COLOR = '#9ccadf';
@@ -93,7 +92,7 @@ const TrendingSection = ({
       listener: (event: any) => {
         const offset = event.nativeEvent.contentOffset.x;
         // Adjust activeIndex calculation to account for padding
-        const newIndex = Math.round((offset - LEFT_PADDING + (ITEM_WIDTH / 2)) / ITEM_WIDTH);
+        const newIndex = Math.round((offset + (ITEM_WIDTH / 2)) / ITEM_WIDTH);
         if (newIndex !== activeIndex && newIndex >= 0 && newIndex < movies.length) {
           setActiveIndex(newIndex);
         }
@@ -105,7 +104,7 @@ const TrendingSection = ({
     if (flatListRef.current && index >= 0 && index < movies.length) {
       // Adjust offset calculation to account for padding
       flatListRef.current.scrollToOffset({
-        offset: index * ITEM_WIDTH + LEFT_PADDING,
+        offset: index * ITEM_WIDTH,
         animated: true
       });
     }
@@ -121,10 +120,10 @@ const TrendingSection = ({
     />
   );
   
-  // Create the custom container style with asymmetric padding
+  // Create the custom container style with symmetric padding
   const listContainerStyle = {
-    paddingLeft: LEFT_PADDING,
-    paddingRight: RIGHT_PADDING,
+    paddingLeft: HORIZONTAL_PADDING,
+    paddingRight: HORIZONTAL_PADDING,
     paddingVertical: 10,
     paddingTop: 50, // Reduced padding top to give more space for logos
   };
@@ -166,7 +165,7 @@ const TrendingSection = ({
           windowSize={5}
           getItemLayout={(data, index) => ({
             length: ITEM_WIDTH,
-            offset: ITEM_WIDTH * index + LEFT_PADDING,
+            offset: ITEM_WIDTH * index + HORIZONTAL_PADDING,
             index,
           })}
         />
@@ -225,7 +224,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255, 255, 255, 0.7)',
     marginHorizontal: 20,
-    marginBottom: 5, // Reduced bottom margin
+    marginBottom: 15, // Reduced bottom margin
   }
 });
 

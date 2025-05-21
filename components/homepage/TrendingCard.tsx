@@ -9,7 +9,7 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = SCREEN_WIDTH * 0.7;
 const CARD_HEIGHT = CARD_WIDTH * 1.5;
 const LOGO_HEIGHT = 290;
-const LOGO_TOP_OFFSET = -107;
+const LOGO_TOP_OFFSET = -70;
 const LOGO_MAX_WIDTH = CARD_WIDTH * 0.9;
 
 // Performance optimized 3D number with fewer layers
@@ -75,21 +75,43 @@ interface ExtendedTrendingMovie extends TrendingMovie {
   clean_poster_url?: string;
 }
 
-// Improved movie logo component with detailed tweaking options
+// Performance optimized movie logo component
 const MovieLogo = React.memo(({ 
   logoPath,
   logoOpacity,
   logoTransform
 }: { 
-  logoPath: string | null,
+  logoPath: string | null | undefined,
   logoOpacity: Animated.AnimatedInterpolation<number>,
   logoTransform: {
     translateY: Animated.AnimatedInterpolation<number>,
+    translateX: Animated.AnimatedInterpolation<number>,
+    rotate: Animated.AnimatedInterpolation<string>,
     scale: Animated.AnimatedInterpolation<number>
   }
 }) => {
   const [logoSize, setLogoSize] = useState({ width: LOGO_MAX_WIDTH, height: LOGO_HEIGHT * 0.5 });
   
+  // Memoize the transform style to prevent unnecessary recalculations
+  const transformStyle = useMemo(() => [
+    { perspective: 1000 },
+    { translateY: logoTransform.translateY },
+    { translateX: logoTransform.translateX },
+    { rotate: logoTransform.rotate },
+    { scale: logoTransform.scale }
+  ], [logoTransform]);
+
+  // Memoize the image style to prevent unnecessary recalculations
+  const imageStyle = useMemo(() => [
+    styles.logoImage,
+    { 
+      width: logoSize.width, 
+      height: logoSize.height,
+      transform: [{ perspective: 1000 }]
+    }
+  ], [logoSize]);
+
+  // Early return after hooks are defined
   if (!logoPath) return null;
   
   return (
@@ -98,20 +120,14 @@ const MovieLogo = React.memo(({
         styles.logoOuterContainer,
         {
           opacity: logoOpacity,
-          transform: [
-            { translateY: logoTransform.translateY },
-            { scale: logoTransform.scale }
-          ]
+          transform: transformStyle
         }
       ]}
     >
-      <View style={styles.logoWrapper}>
+      <View style={[styles.logoWrapper, { transform: [{ perspective: 1000 }] }]}>
         <Image
-          source={{ uri: `https://image.tmdb.org/t/p/w500${logoPath}` }}
-          style={[
-            styles.logoImage,
-            { width: logoSize.width, height: logoSize.height }
-          ]}
+          source={{ uri: `https://image.tmdb.org/t/p/w1280${logoPath}` }}
+          style={imageStyle}
           resizeMode="contain"
           fadeDuration={0}
           onLoad={(event) => {
@@ -124,48 +140,31 @@ const MovieLogo = React.memo(({
               
               if (aspectRatio <= 1) {
                 // For tall/square logos (like Marvel, Sony Pictures)
-                // TWEAK POINT 1: Adjust this value (0.7) to change how tall the vertical logos appear
-                // Higher value = taller logos (range 0.3-0.9)
                 newHeight = LOGO_HEIGHT * 0.4; 
                 newWidth = newHeight * aspectRatio;
                 
-                // TWEAK POINT 2: Adjust the minimum width for tall logos
-                // Higher value = wider minimum width (range 0.2-0.6)
-                // This helps very tall logos not appear too skinny
                 if (newWidth < LOGO_MAX_WIDTH * 0.4) {
                   newWidth = LOGO_MAX_WIDTH * 0.8;
                   newHeight = newWidth / aspectRatio;
                 }
               } else if (aspectRatio <= 2) {
                 // For medium width logos (like Disney, Pixar)
-                // TWEAK POINT 3: Adjust this value (0.7) to change how wide the medium-width logos appear
-                // Higher value = wider logos (range 0.5-0.9)
                 newWidth = LOGO_MAX_WIDTH * 0.7;
                 newHeight = newWidth / aspectRatio;
               } else {
                 // For very wide logos (like Star Wars, Top Gun)
-                // TWEAK POINT 4: Adjust this value (1.0) to control the width of wide logos
-                // Lower to make them less wide (range 0.7-1.0)
                 newWidth = LOGO_MAX_WIDTH * 1.0;
                 newHeight = newWidth / aspectRatio;
                 
-                // TWEAK POINT 5: Minimum height for wide logos
-                // Increase this value (0.2) to make very wide logos taller (range 0.1-0.4)
                 if (newHeight < LOGO_HEIGHT * 0.2) {
                   newHeight = LOGO_HEIGHT * 0.9;
                   newWidth = newHeight * aspectRatio;
                 }
               }
               
-              // TWEAK POINT 6: Maximum width cap
-              // You can adjust LOGO_MAX_WIDTH at the top of the file
               newWidth = Math.min(newWidth, LOGO_MAX_WIDTH);
-              
-              // TWEAK POINT 7: Maximum height cap for all logos
-              // Increase this value (0.7) to allow taller logos (range 0.5-0.9)
               newHeight = Math.min(newHeight, LOGO_HEIGHT * 0.9);
               
-              // Update the logo size state
               setLogoSize({ width: newWidth, height: newHeight });
             }
           }}
@@ -181,65 +180,115 @@ interface ParallaxTrendingCardProps extends TrendingCardProps {
   itemWidth: number;
 }
 
-const TrendingCard = ({
+const TrendingCard = React.memo(({
   movie,
   index,
   scrollX,
   itemIndex,
   itemWidth
 }: ParallaxTrendingCardProps) => {
-  const { movie_id, title, poster_url } = movie;
+  const { movie_id, poster_url } = movie;
   const extendedMovie = movie as ExtendedTrendingMovie;
   
-  // Simplified parallax effect - only calculate for current card and adjacent cards
-  const inputRange = [
+  // Memoize input ranges to prevent recalculation
+  const extendedInputRange = useMemo(() => [
+    (itemIndex - 2) * itemWidth,
     (itemIndex - 1) * itemWidth,
     itemIndex * itemWidth,
-    (itemIndex + 1) * itemWidth
-  ];
-  
-  // Scale animation: 0.92 when not active, 1 when active (reduced range for better performance)
-  const scale = scrollX.interpolate({
-    inputRange,
-    outputRange: [0.92, 1, 0.92],
-    extrapolate: 'clamp'
-  });
-  
-  // Card opacity animation (0.7 to 1 for better visibility)
-  const opacity = scrollX.interpolate({
-    inputRange,
-    outputRange: [0.7, 1, 0.7],
-    extrapolate: 'clamp'
-  });
-  
-  // For the active logo detection, use a narrower range
-  const activeInputRange = [
-    itemIndex * itemWidth - (itemWidth * 0.3),  // Start when we're 30% of the way to the center
-    itemIndex * itemWidth,                      // Full opacity at center
-    itemIndex * itemWidth + (itemWidth * 0.3)   // End when we're 30% past the center
-  ];
-  
-  // Logo opacity - only visible when close to the center (0 to 1)
-  const logoOpacity = scrollX.interpolate({
-    inputRange: activeInputRange,
-    outputRange: [0, 1, 0],
-    extrapolate: 'clamp'
-  });
-  
-  // Logo transform animations
-  const logoTransform = {
-    translateY: scrollX.interpolate({
-      inputRange: activeInputRange,
-      outputRange: [20, -40, 20], // Bigger movement for more dramatic effect
+    (itemIndex + 1) * itemWidth,
+    (itemIndex + 2) * itemWidth
+  ], [itemIndex, itemWidth]);
+
+  const activeInputRange = useMemo(() => [
+    itemIndex * itemWidth - (itemWidth * 0.3),
+    itemIndex * itemWidth,
+    itemIndex * itemWidth + (itemWidth * 0.3)
+  ], [itemIndex, itemWidth]);
+
+  // Calculate the scale factor for the poster to make it larger than the card
+  const POSTER_SCALE = 1.2;
+
+  // Memoize all animations to prevent recalculation
+  const animations = useMemo(() => ({
+    scale: scrollX.interpolate({
+      inputRange: extendedInputRange,
+      outputRange: [0.6, 0.8, 1.0, 0.8, 0.6],
       extrapolate: 'clamp'
     }),
-    scale: scrollX.interpolate({
+    rotateY: scrollX.interpolate({
+      inputRange: extendedInputRange,
+      outputRange: ['-60deg', '-30deg', '0deg', '30deg', '60deg'],
+      extrapolate: 'clamp'
+    }),
+    translateX: scrollX.interpolate({
+      inputRange: extendedInputRange,
+      outputRange: [-100, -50, 0, 50, 100],
+      extrapolate: 'clamp'
+    }),
+    posterTranslateX: scrollX.interpolate({
+      inputRange: extendedInputRange,
+      outputRange: [-200, -80, 0, 80, 200],
+      extrapolate: 'clamp'
+    }),
+    posterTranslateY: scrollX.interpolate({
+      inputRange: extendedInputRange,
+      outputRange: [-50, -30, 0, 30, 50],
+      extrapolate: 'clamp'
+    }),
+    opacity: scrollX.interpolate({
+      inputRange: extendedInputRange,
+      outputRange: [0.3, 0.6, 1, 0.6, 0.3],
+      extrapolate: 'clamp'
+    }),
+    logoOpacity: scrollX.interpolate({
       inputRange: activeInputRange,
-      outputRange: [0.8, 1.2, 0.8], // Grow when active
+      outputRange: [0, 1, 0],
+      extrapolate: 'clamp'
+    }),
+    logoTransform: {
+      translateY: scrollX.interpolate({
+        inputRange: activeInputRange,
+        outputRange: [100, -40, 100],
+        extrapolate: 'clamp'
+      }),
+      translateX: scrollX.interpolate({
+        inputRange: activeInputRange,
+        outputRange: [-200, 0, 200],
+        extrapolate: 'clamp'
+      }),
+      rotate: scrollX.interpolate({
+        inputRange: activeInputRange,
+        outputRange: ['-45deg', '0deg', '45deg'],
+        extrapolate: 'clamp'
+      }),
+      scale: scrollX.interpolate({
+        inputRange: activeInputRange,
+        outputRange: [0.3, 1.2, 0.3],
+        extrapolate: 'clamp'
+      })
+    },
+    numberOpacity: scrollX.interpolate({
+      inputRange: activeInputRange,
+      outputRange: [0, 1, 0],
       extrapolate: 'clamp'
     })
-  };
-  
+  }), [scrollX, extendedInputRange, activeInputRange]);
+
+  // Memoize transform style
+  const transformStyle = useMemo(() => [
+    { perspective: 1000 },
+    { translateX: animations.translateX },
+    { scale: animations.scale },
+    { rotateY: animations.rotateY }
+  ], [animations]);
+
+  // Memoize poster transform style
+  const posterTransformStyle = useMemo(() => [
+    { scale: POSTER_SCALE },
+    { translateX: animations.posterTranslateX },
+    { translateY: animations.posterTranslateY }
+  ], [animations]);
+
   return (
     <Link href={`/movie/${movie_id}`} asChild>
       <TouchableOpacity>
@@ -247,40 +296,44 @@ const TrendingCard = ({
           style={[
             styles.container,
             {
-              transform: [{ scale }],
-              opacity
+              transform: transformStyle,
+              opacity: animations.opacity
             }
           ]}
         >
-          {/* Movie logo with dramatic pop-up effect when active */}
           <MovieLogo 
             logoPath={extendedMovie.logo_path}
-            logoOpacity={logoOpacity}
-            logoTransform={logoTransform}
+            logoOpacity={animations.logoOpacity}
+            logoTransform={animations.logoTransform}
           />
           
-          {/* 3D Number with performance optimization */}
-          <View style={styles.rankingContainer}>
+          <Animated.View style={[styles.rankingContainer, { opacity: animations.numberOpacity }]}>
             <TrendingNumber number={index + 1} />
-          </View>
+          </Animated.View>
           
           <View style={styles.card}>
-            <Image
-              source={{ uri: extendedMovie.clean_poster_url || poster_url }}
-              style={styles.posterImage}
+            <Animated.Image
+              source={{ 
+                uri: (extendedMovie.clean_poster_url || poster_url).replace('/w500', '/w1280'),
+                cache: 'force-cache'
+              }}
+              style={[
+                styles.posterImage,
+                { transform: posterTransformStyle }
+              ]}
               resizeMode="cover"
               fadeDuration={0}
             />
             
-            {/* Top gradient to help logos stand out better */}
             <LinearGradient
-              colors={['rgba(0,0,0,0.7)', 'transparent']}
+              colors={['rgba(0,0,0,0.8)', 'rgba(0,0,0,0.4)', 'transparent']}
+              locations={[0, 0.3, 0.6]}
               style={styles.topGradient}
             />
             
-            {/* Bottom gradient for better number visibility */}
             <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.9)']}
+              colors={['transparent', 'rgba(0,0,0,0.4)', 'rgba(0,0,0,0.99)']}
+              locations={[0.4, 0.5, 0.9]}
               style={styles.bottomGradient}
             />
           </View>
@@ -288,7 +341,7 @@ const TrendingCard = ({
       </TouchableOpacity>
     </Link>
   );
-};
+});
 
 const styles = StyleSheet.create({
   container: {
@@ -297,6 +350,8 @@ const styles = StyleSheet.create({
     marginLeft: 20,
     marginBottom: 10,
     marginTop: 10,
+    transformOrigin: 'center center',
+    backfaceVisibility: 'hidden',
   },
   logoOuterContainer: {
     position: 'absolute',
@@ -310,25 +365,26 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 9 },
     shadowOpacity: 0.9,
     shadowRadius: 3,
+    transformOrigin: 'center bottom',
   },
   logoWrapper: {
-    // This centers the logo within its container
     alignItems: 'center',
     justifyContent: 'center',
     width: LOGO_MAX_WIDTH,
     height: LOGO_HEIGHT * 0.6,
+    transform: [{ perspective: 1000 }],
   },
   logoImage: {
-    // Size is dynamically set based on aspect ratio
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3, 
     shadowRadius: 6,
+    transform: [{ perspective: 1000 }],
   },
   card: {
     width: CARD_WIDTH,
     height: CARD_HEIGHT,
-    borderRadius: 30, // Reduced from 60 to a more standard card radius
+    borderRadius: 30,
     overflow: 'hidden',
     position: 'relative',
     elevation: 10,
@@ -342,20 +398,25 @@ const styles = StyleSheet.create({
   posterImage: {
     width: '100%',
     height: '100%',
+    position: 'absolute',
+    top: 0,
+    left: 0,
   },
   topGradient: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    height: '30%',
+    left: -20, // Extend beyond left edge
+    right: -20, // Extend beyond right edge
+    top: -20, // Extend beyond top edge
+    height: '50%', // Increased height
+    zIndex: 1,
   },
   bottomGradient: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: '30%',
+    left: -20, // Extend beyond left edge
+    right: -20, // Extend beyond right edge
+    bottom: -20, // Extend beyond bottom edge
+    height: '50%', // Increased height
+    zIndex: 1,
   },
   rankingContainer: {
     position: 'absolute',
@@ -379,4 +440,4 @@ const styles = StyleSheet.create({
   }
 });
 
-export default React.memo(TrendingCard);
+export default TrendingCard;
