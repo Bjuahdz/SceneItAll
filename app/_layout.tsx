@@ -10,11 +10,22 @@ export default function RootLayout() {
       <Stack>
         <Stack.Screen
           name="(tabs)"
-          options={{ headerShown:false}}
+          options={{ headerShown: false }}
         />
         <Stack.Screen
           name="movie/[id]"
-          options={{headerShown:false}}
+          options={{ headerShown: false }}
+        />
+        <Stack.Screen
+          name="(authentication)"
+          options={{
+            headerShown: false,
+            presentation: 'modal',
+            animation: 'slide_from_bottom',
+            contentStyle: {
+              backgroundColor: 'transparent',
+            },
+          }}
         />
       </Stack>
     </>

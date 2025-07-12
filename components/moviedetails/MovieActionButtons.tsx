@@ -2,9 +2,23 @@ import { View, TouchableOpacity, Text, StyleSheet, Animated } from 'react-native
 import { Ionicons, MaterialCommunityIcons, AntDesign } from '@expo/vector-icons';
 import React, { useState, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
+import { showAuthModal, isAuthenticated } from '@/app/utils/auth';
+import { MovieActionButtonsProps } from '@/interfaces/interfaces';
 
-const FavoriteButton = ({ onPress, isFavorite }) => {
-  const [particles, setParticles] = useState([]);
+interface Particle {
+  id: number;
+  animation: Animated.ValueXY;
+  opacity: Animated.Value;
+  scale: Animated.Value;
+}
+
+interface FavoriteButtonProps {
+  onPress: () => void;
+  isFavorite: boolean;
+}
+
+const FavoriteButton = ({ onPress, isFavorite }: FavoriteButtonProps) => {
+  const [particles, setParticles] = useState<Particle[]>([]);
   const rotateAnim = useRef(new Animated.Value(0)).current;
   const bounceAnim = useRef(new Animated.Value(1)).current;
 
@@ -175,6 +189,10 @@ const MovieActionButtons = ({
 }: MovieActionButtonsProps) => {
 
   const handleLike = async () => {
+    if (!(await isAuthenticated())) {
+      showAuthModal('like');
+      return;
+    }
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!isLiked && isDisliked) {
       onStateChange?.({ isLiked: true, isDisliked: false, isFavorite });
@@ -183,6 +201,10 @@ const MovieActionButtons = ({
   };
 
   const handleDislike = async () => {
+    if (!(await isAuthenticated())) {
+      showAuthModal('dislike');
+      return;
+    }
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!isDisliked && (isLiked || isFavorite)) {
       onStateChange?.({ isLiked: false, isDisliked: true, isFavorite: false });
@@ -190,11 +212,23 @@ const MovieActionButtons = ({
     onDislike();
   };
 
-  const handleFavorite = () => {
+  const handleFavorite = async () => {
+    if (!(await isAuthenticated())) {
+      showAuthModal('favorite');
+      return;
+    }
     if (!isFavorite && isDisliked) {
       onStateChange?.({ isLiked, isDisliked: false, isFavorite: true });
     }
     onFavorite();
+  };
+
+  const handleWatch = async () => {
+    if (!(await isAuthenticated())) {
+      showAuthModal('watch');
+      return;
+    }
+    onWatch();
   };
 
   return (
@@ -247,7 +281,7 @@ const MovieActionButtons = ({
 
       <TouchableOpacity 
         style={styles.watchButton}
-        onPress={onWatch}
+        onPress={handleWatch}
         activeOpacity={0.7}
       >
         <Ionicons name="play" size={20} color="#000000" />

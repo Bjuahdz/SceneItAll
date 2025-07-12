@@ -1,4 +1,4 @@
-import { View, Animated, Dimensions, ActivityIndicator, Text, Platform, RefreshControl, ScrollView, TouchableOpacity, StyleSheet } from 'react-native'
+import { View, Animated, Dimensions, ActivityIndicator, Text, Platform, RefreshControl, ScrollView, TouchableOpacity, StyleSheet, StatusBar } from 'react-native'
 import { BlurView } from 'expo-blur';
 import React, { useState, useRef, useEffect } from 'react'
 import { useLocalSearchParams } from 'expo-router';
@@ -344,6 +344,14 @@ const MovieDetails = () => {
   // Add back the mainScrollViewRef
   const mainScrollViewRef = useRef<ScrollView>(null);
 
+  // Add useEffect for status bar
+  useEffect(() => {
+    StatusBar.setHidden(true);
+    return () => {
+      StatusBar.setHidden(false);
+    };
+  }, []);
+
   if (loading && !imageUri) {
     return (
       <View className="bg-primary flex-1 justify-center items-center">
@@ -351,9 +359,15 @@ const MovieDetails = () => {
       </View>
     );
   }
-
+  
   return (
     <View className="flex-1 bg-black">
+      <StatusBar 
+        hidden={true}
+        translucent={true}
+        backgroundColor="transparent"
+        barStyle="light-content"
+      />
       {/* Add Sticky Header */}
       <Animated.View
         style={{
@@ -362,7 +376,7 @@ const MovieDetails = () => {
           left: 0,
           right: 0,
           height: headerHeight,
-          backgroundColor: 'rgba(0,0,0,0.95)',
+          backgroundColor: 'rgba(0,0,0,0.98)',
           zIndex: 1000,
           opacity: headerOpacity,
           transform: [{ translateY: headerTranslateY }],
@@ -617,7 +631,7 @@ const MovieDetails = () => {
                   
                   {/* Top dark gradient for logo visibility */}
                   <LinearGradient
-                    colors={['rgba(0,0,0,0.8)', 'transparent', 'transparent']}
+                    colors={['rgba(0,0,0,0.98)', 'transparent', 'transparent']}
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -629,13 +643,13 @@ const MovieDetails = () => {
                   
                   {/* Bottom dark gradient for better text visibility */}
                   <LinearGradient
-                    colors={['transparent', 'rgba(0,0,0,0.9)']}
+                    colors={['transparent', 'rgba(0,0,0,0.98)']}
                     style={{
                       position: 'absolute',
                       bottom: 0,
                       left: 0,
                       right: 0,
-                      height: '30%',
+                      height: '60%',
                     }}
                   />
                 </Animated.View>
@@ -671,9 +685,6 @@ const MovieDetails = () => {
                       textAlign: 'center',
                       marginTop: 12,
                       maxWidth: SCREEN_WIDTH * 0.8,
-                      textShadowColor: 'rgba(0, 0, 0, 0.75)',
-                      textShadowOffset: { width: 0, height: 1 },
-                      textShadowRadius: 2,
                     }}>
                       "{movie.tagline}"
                     </Text>
@@ -861,14 +872,6 @@ const styles = StyleSheet.create({
   logoImage: {
     width: SCREEN_WIDTH * 0.7,
     height: 100,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 10,
-    },
-    shadowOpacity: 0.9,
-    shadowRadius: 15,
-    elevation: 20,
   }
 });
 

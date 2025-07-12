@@ -5,6 +5,8 @@ import { UserProfile } from '../../interfaces/UserProfile'
 import { MaterialIcons, FontAwesome5, Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { BlurView } from 'expo-blur'
+import { router } from 'expo-router'
+import { logout } from '../utils/auth'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const HEADER_HEIGHT = 240;
@@ -35,6 +37,16 @@ const Profile = () => {
       percentage: (count / total) * 100
     })).sort((a, b) => b.percentage - a.percentage);
   }, [profile.watchedGenres]);
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      // Navigate to the login screen
+      router.replace('/login');
+    } catch (error) {
+      console.error('Error logging out:', error);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -175,7 +187,16 @@ const Profile = () => {
             </View>
             <Ionicons name="chevron-forward" size={22} color="#9ccadf" />
           </TouchableOpacity>
-    </View>
+        </View>
+
+        {/* Logout Button */}
+        <TouchableOpacity 
+          style={styles.logoutButton}
+          onPress={handleLogout}
+        >
+          <Ionicons name="log-out-outline" size={20} color="#ef4444" />
+          <Text style={styles.logoutText}>Log Out</Text>
+        </TouchableOpacity>
 
         {/* Footer Space */}
         <View style={{ height: 40 }} />
@@ -399,6 +420,25 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 12,
     marginTop: 2,
+  },
+  logoutButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    padding: 16,
+    borderRadius: 12,
+    marginHorizontal: 20,
+    marginTop: 20,
+    marginBottom: 40,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.2)',
+  },
+  logoutText: {
+    color: '#ef4444',
+    fontSize: 16,
+    fontWeight: '600',
   },
 })
 

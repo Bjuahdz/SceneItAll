@@ -23,7 +23,7 @@ const TrailerPlayer: React.FC<TrailerPlayerProps> = ({
   const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
   
   // Adjust these values to change the size
-  const SCREEN_RATIO = 0.45; // Decrease this value to make it smaller (e.g., 0.65 for 65% of screen)
+  const SCREEN_RATIO = 0.50 ; // Decrease this value to make it smaller (e.g., 0.65 for 65% of screen)
   const ASPECT_RATIO = 16/9;
   
   // Calculate video dimensions

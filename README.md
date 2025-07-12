@@ -13,7 +13,7 @@ ________________________________________________________________________________
 
 
 TODO based on priority: 
-- User Auth
+- User Auth and Flow (login page, onboarding,etc)
 - User Sessions
 - UX Design changes (using Moti and ReAnimated versions 3+) 
 - 
