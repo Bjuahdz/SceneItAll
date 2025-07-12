@@ -14,6 +14,7 @@ import TrailerPlayer from '../TrailerPlayer';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { MotiView } from 'moti';
 import type { 
   MovieTabBarProps, 
   TabType, 
@@ -1235,17 +1236,174 @@ const MovieTabBar = ({
                       flex: 1,
                       justifyContent: 'center',
                       alignItems: 'center',
-                      padding: 20,
+                      padding: 16,
                     }}>
-                      {/* You can keep a placeholder or leave it empty */}
-                      {/* <Text style={{
-                        color: 'rgba(255,255,255,0.5)',
-                        fontSize: 16,
-                        fontStyle: 'italic',
-                        textAlign: 'center',
-                      }}>
-                        Production Companies (coming soon)
-                      </Text> */}
+                      <ScrollView 
+                        showsVerticalScrollIndicator={false}
+                        contentContainerStyle={{
+                          gap: 12,
+                          paddingBottom: 16,
+                        }}
+                      >
+                        {movie.production_companies.length > 0 ? (
+                          movie.production_companies.map((company, index) => (
+                            <MotiView
+                              key={company.id}
+                              from={{
+                                opacity: 0,
+                                translateX: -20,
+                              }}
+                              animate={{
+                                opacity: 1,
+                                translateX: 0,
+                              }}
+                              transition={{
+                                type: 'timing',
+                                duration: 400,
+                                delay: index * 100,
+                              }}
+                              style={{
+                                backgroundColor: 'rgba(156, 202, 223, 0.05)',
+                                borderRadius: 12,
+                                padding: 10,
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 10,
+                                borderWidth: 1,
+                                borderColor: 'rgba(156, 202, 223, 0.1)',
+                              }}
+                            >
+                              {company.logo_path ? (
+                                <View style={{
+                                  width: 45,
+                                  height: 45,
+                                  justifyContent: 'center',
+                                  alignItems: 'center',
+                                  marginRight: 2,
+                                }}>
+                                  <MotiView
+                                    from={{
+                                      opacity: 0,
+                                      scale: 0.8,
+                                    }}
+                                    animate={{
+                                      opacity: 1,
+                                      scale: 1,
+                                    }}
+                                    transition={{
+                                      type: 'timing',
+                                      duration: 600,
+                                      delay: index * 100 + 200,
+                                    }}
+                                    style={{
+                                      position: 'absolute',
+                                      width: '100%',
+                                      height: '100%',
+                                      backgroundColor: 'rgba(156, 202, 223, 0.15)',
+                                      borderRadius: 6,
+                                      transform: [{ scale: 1.2 }],
+                                      shadowColor: '#9ccadf',
+                                      shadowOffset: { width: 0, height: 0 },
+                                      shadowOpacity: 0.3,
+                                      shadowRadius: 8,
+                                      elevation: 8,
+                                    }}
+                                  />
+                                  <Image
+                                    source={{
+                                      uri: `https://image.tmdb.org/t/p/w200${company.logo_path}`,
+                                    }}
+                                    style={{
+                                      width: '100%',
+                                      height: '100%',
+                                      resizeMode: 'contain',
+                                    }}
+                                  />
+                                </View>
+                              ) : (
+                                <View style={{
+                                  width: 45,
+                                  height: 45,
+                                  backgroundColor: 'rgba(156, 202, 223, 0.1)',
+                                  borderRadius: 6,
+                                  justifyContent: 'center',
+                                  alignItems: 'center',
+                                  marginRight: 2,
+                                  shadowColor: '#9ccadf',
+                                  shadowOffset: { width: 0, height: 0 },
+                                  shadowOpacity: 0.2,
+                                  shadowRadius: 4,
+                                  elevation: 4,
+                                }}>
+                                  <Ionicons 
+                                    name="business-outline" 
+                                    size={18} 
+                                    color="rgba(156, 202, 223, 0.6)" 
+                                  />
+                                </View>
+                              )}
+                              <View style={{ 
+                                flex: 1, 
+                                justifyContent: 'center',
+                                paddingRight: 4,
+                              }}>
+                                <Text 
+                                  numberOfLines={1}
+                                  style={{
+                                    color: 'rgba(255,255,255,0.9)',
+                                    fontSize: 13,
+                                    fontWeight: '600',
+                                    marginBottom: 3,
+                                  }}
+                                >
+                                  {company.name}
+                                </Text>
+                                {company.origin_country && (
+                                  <View style={{
+                                    backgroundColor: 'rgba(156, 202, 223, 0.1)',
+                                    paddingHorizontal: 6,
+                                    paddingVertical: 1,
+                                    borderRadius: 4,
+                                    alignSelf: 'flex-start',
+                                  }}>
+                                    <Text style={{
+                                      color: 'rgba(156, 202, 223, 0.8)',
+                                      fontSize: 10,
+                                      fontWeight: '500',
+                                    }}>
+                                      {company.origin_country}
+                                    </Text>
+                                  </View>
+                                )}
+                              </View>
+                            </MotiView>
+                          ))
+                        ) : (
+                          <View style={{
+                            backgroundColor: 'rgba(156, 202, 223, 0.05)',
+                            borderRadius: 12,
+                            padding: 16,
+                            alignItems: 'center',
+                            gap: 10,
+                            borderWidth: 1,
+                            borderColor: 'rgba(156, 202, 223, 0.1)',
+                          }}>
+                            <Ionicons 
+                              name="business-outline" 
+                              size={28} 
+                              color="rgba(156, 202, 223, 0.6)" 
+                            />
+                            <Text style={{
+                              color: 'rgba(255,255,255,0.5)',
+                              fontSize: 13,
+                              textAlign: 'center',
+                              fontStyle: 'italic',
+                            }}>
+                              No production companies available
+                            </Text>
+                          </View>
+                        )}
+                      </ScrollView>
                     </View>
 
                     {/* Footer Label - Back Side */}

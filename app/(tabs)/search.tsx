@@ -163,9 +163,11 @@ const Search = () => {
 
       {/* Error display */}
       {(searchError || anyGenreError) && (
-        <Text className="text-red-500 px-5 my-3">
-          Error: An error occurred while loading content
-        </Text>
+        <View className="bg-primary justify-center items-center py-3">
+          <Text className="text-red-500 text-center">
+            Error: An error occurred while loading content
+          </Text>
+        </View>
       )}
 
       {/* Conditional rendering based on search state */}
