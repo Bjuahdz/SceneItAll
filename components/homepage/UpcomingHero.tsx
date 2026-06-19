@@ -42,20 +42,22 @@ const UpcomingHero = ({ movie, onNotify, isActive = true }: UpcomingHeroProps) =
   }, [isActive]);
   
   React.useEffect(() => {
-    // Fetch movie logo
-    const fetchLogo = async () => {
-      try {
-        const imageData = await fetchMovieImages(movie.id.toString());
-        if (imageData.logo) {
-          setLogoPath(imageData.logo);
+    // Fetch movie logo only if not already fetched
+    if (!logoPath) {
+      const fetchLogo = async () => {
+        try {
+          const imageData = await fetchMovieImages(movie.id.toString());
+          if (imageData.logo) {
+            setLogoPath(imageData.logo);
+          }
+        } catch (error) {
+          console.error('Error fetching logo:', error);
         }
-      } catch (error) {
-        console.error('Error fetching logo:', error);
-      }
-    };
-    
-    fetchLogo();
-  }, [movie.id]);
+      };
+      
+      fetchLogo();
+    }
+  }, [movie.id, logoPath]);
   
   if (!movie) return null;
   
