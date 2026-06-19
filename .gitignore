@@ -17,6 +17,9 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+#LOCAL LOGS
+REVIVAL_LOG.md
+
 # Metro
 .metro-health-check*
 
