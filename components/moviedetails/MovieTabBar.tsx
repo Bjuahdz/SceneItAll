@@ -15,11 +15,12 @@ import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { MotiView } from 'moti';
-import type { 
-  MovieTabBarProps, 
-  TabType, 
-  Quality, 
-  CollapsibleSectionProps 
+import type {
+  MovieTabBarProps,
+  TabType,
+  Quality,
+  CollapsibleSectionProps,
+  MovieVideo
 } from '../../interfaces/interfaces';
 
 /**
