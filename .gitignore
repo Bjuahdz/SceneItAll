@@ -17,6 +17,9 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+#LOCAL LOGS
+REVIVAL_LOG.md
+
 # Metro
 .metro-health-check*
 
@@ -30,6 +33,7 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript

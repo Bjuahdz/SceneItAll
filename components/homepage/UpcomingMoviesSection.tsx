@@ -1,12 +1,12 @@
 import React, { memo, useState, useRef } from 'react';
-import { 
-  View, 
-  Text, 
-  Dimensions, 
-  StyleSheet, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  Dimensions,
+  StyleSheet,
   FlatList,
-  Animated
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
 import { FontAwesome5 } from '@expo/vector-icons';
 import { Movie } from '@/interfaces/interfaces';
@@ -19,82 +19,58 @@ interface UpcomingMoviesSectionProps {
 }
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const HERO_HEIGHT = 440;
+const PRIMARY_COLOR = '#9ccadf';
 
-// Create animated FlatList
-const AnimatedFlatList = Animated.createAnimatedComponent(FlatList);
-
-const UpcomingMoviesSection = ({ 
-  movies, 
-  title = "Upcoming Movies" 
-}: UpcomingMoviesSectionProps) => {
+const UpcomingMoviesSection = ({ movies, title = 'Upcoming Movies' }: UpcomingMoviesSectionProps) => {
   const [activeIndex, setActiveIndex] = useState(0);
-  const scrollX = useRef(new Animated.Value(0)).current;
-  const flatListRef = useRef<FlatList>(null);
-  
+  const flatListRef = useRef<FlatList<Movie>>(null);
+
   if (!movies || movies.length === 0) return null;
-  
-  // Filter to only include upcoming movies
-  const upcomingMovies = movies.filter(movie => {
-    const releaseDate = new Date(movie.release_date);
-    const today = new Date();
-    return releaseDate > today;
-  });
-  
+
+  // Only future releases.
+  const upcomingMovies = movies.filter((movie) => new Date(movie.release_date) > new Date());
   if (upcomingMovies.length === 0) return null;
-  
+
   const handleNotify = (movieId: number) => {
     // This will be implemented later
     console.log(`Notification requested for movie ${movieId}`);
   };
-  
+
   const navigateToPage = (index: number) => {
     if (flatListRef.current && index >= 0 && index < upcomingMovies.length) {
-      flatListRef.current.scrollToOffset({
-        offset: index * SCREEN_WIDTH,
-        animated: true
-      });
+      flatListRef.current.scrollToOffset({ offset: index * SCREEN_WIDTH, animated: true });
     }
   };
-  
-  // Handle scroll event to update active index
-  const handleScroll = Animated.event(
-    [{ nativeEvent: { contentOffset: { x: scrollX } } }],
-    { 
-      useNativeDriver: true,
-      listener: (event: any) => {
-        const offset = event.nativeEvent.contentOffset.x;
-        const newIndex = Math.round(offset / SCREEN_WIDTH);
-        if (newIndex !== activeIndex && newIndex >= 0 && newIndex < upcomingMovies.length) {
-          setActiveIndex(newIndex);
-        }
-      }
-    }
-  );
-  
+
+  // Plain JS onScroll → index state. Reliable on the new architecture, unlike a
+  // native-driven Animated.event whose JS listener can stall on Fabric (which is what
+  // left the pagination frozen).
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offset = event.nativeEvent.contentOffset.x;
+    const newIndex = Math.min(upcomingMovies.length - 1, Math.max(0, Math.round(offset / SCREEN_WIDTH)));
+    setActiveIndex((prev) => (prev === newIndex ? prev : newIndex));
+  };
+
   const renderUpcomingMovie = ({ item }: { item: Movie }) => (
-    <UpcomingHero 
-      movie={item} 
-      onNotify={handleNotify}
-    />
+    <UpcomingHero movie={item} onNotify={handleNotify} />
   );
-  
+
   return (
     <View style={styles.container}>
       <View style={styles.headerContent}>
         <View style={styles.titleRow}>
-          <FontAwesome5 name="calendar-alt" size={20} color="#9ccadf" style={styles.titleIcon} />
+          <FontAwesome5 name="calendar-alt" size={20} color={PRIMARY_COLOR} style={styles.titleIcon} />
           <Text style={styles.title}>{title}</Text>
         </View>
       </View>
-      
-      <AnimatedFlatList
+
+      <FlatList
         ref={flatListRef}
         data={upcomingMovies}
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
-        bounces={true}
+        bounces
         onScroll={handleScroll}
         scrollEventThrottle={16}
         renderItem={renderUpcomingMovie}
@@ -107,16 +83,12 @@ const UpcomingMoviesSection = ({
         windowSize={3}
         initialNumToRender={1}
       />
-      
+
       <Pagination
         currentIndex={activeIndex}
         totalItems={upcomingMovies.length}
         onPageChange={navigateToPage}
-        scrollX={scrollX}
-        primaryColor="#9ccadf"
-        dotsStyle="round"
-        itemWidth={SCREEN_WIDTH}
-        itemSpacing={0}
+        color={PRIMARY_COLOR}
       />
     </View>
   );
@@ -154,4 +126,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default memo(UpcomingMoviesSection); 
+export default memo(UpcomingMoviesSection);

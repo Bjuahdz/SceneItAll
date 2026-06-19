@@ -111,13 +111,11 @@ const MinimalMovieSection = ({
   // Preload the first batch of images on component mount
   React.useEffect(() => {
     if (movies && movies.length > 0) {
-      const imagesToPreload = movies.slice(0, INITIAL_LOAD_COUNT).map(movie => {
-        return {
-          uri: movie.poster_path 
-            ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
-            : "https://placehold.co/600x400/1a1a1a/FFFFFF.png"
-        };
-      });
+      const imagesToPreload = movies.slice(0, INITIAL_LOAD_COUNT).map((movie) =>
+        movie.poster_path
+          ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+          : "https://placehold.co/600x400/1a1a1a/FFFFFF.png"
+      );
       Image.prefetch(imagesToPreload);
     }
   }, [movies]);

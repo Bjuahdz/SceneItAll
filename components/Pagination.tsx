@@ -1,156 +1,90 @@
-import React from 'react';
-import { View, StyleSheet, TouchableOpacity, Animated, Dimensions } from 'react-native';
+import React, { useEffect } from 'react';
+import { View, Pressable, StyleSheet } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  interpolateColor,
+} from 'react-native-reanimated';
+
+const DOT = 7; // inactive dot diameter
+const ACTIVE_WIDTH = 22; // active pill width
+const INACTIVE = 'rgba(255, 255, 255, 0.28)';
 
 interface PaginationProps {
   currentIndex: number;
   totalItems: number;
-  onPageChange: (index: number) => void;
-  scrollX?: Animated.Value;
-  primaryColor?: string;
-  accentColor?: string;
-  dotsStyle?: 'round' | 'line';
-  containerStyle?: object;
-  itemWidth?: number;
-  itemSpacing?: number;
+  onPageChange?: (index: number) => void;
+  /** Active pill colour. */
+  color?: string;
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+/**
+ * One dot. A single 0→1 `progress` shared value is set on the JS thread when `active`
+ * flips, then width + colour + glow interpolate from it on the UI thread — so the
+ * indicator animates only on index change, never per scroll frame. Index-driven on
+ * purpose: scroll-value interpolation freezes at mount on the new architecture
+ * (Fabric), which is what left every dot grey.
+ */
+const Dot = ({
+  index,
+  active,
+  color,
+  onPress,
+}: {
+  index: number;
+  active: boolean;
+  color: string;
+  onPress?: (index: number) => void;
+}) => {
+  const progress = useSharedValue(active ? 1 : 0);
 
-const Pagination = ({
-  currentIndex,
-  totalItems,
-  onPageChange,
-  scrollX = new Animated.Value(0),
-  primaryColor = '#9ccadf',
-  accentColor,
-  dotsStyle = 'round',
-  containerStyle = {},
-  itemWidth = SCREEN_WIDTH,
-  itemSpacing = 0
-}: PaginationProps) => {
-  const dotColor = accentColor || primaryColor;
-  const isLineStyle = dotsStyle === 'line';
-  
-  // No need to render pagination for single item
-  if (totalItems <= 1) return null;
-  
-  // The total width of each item including spacing
-  const totalItemWidth = itemWidth + itemSpacing;
-  
-  // Simple function to navigate to a page
-  const handleDotPress = (index: number) => {
-    if (index >= 0 && index < totalItems) {
-      onPageChange(index);
-    }
-  };
+  useEffect(() => {
+    progress.value = withTiming(active ? 1 : 0, { duration: 240 });
+  }, [active, progress]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    width: DOT + (ACTIVE_WIDTH - DOT) * progress.value,
+    backgroundColor: interpolateColor(progress.value, [0, 1], [INACTIVE, color]),
+    shadowOpacity: 0.85 * progress.value,
+  }));
 
   return (
-    <View style={[styles.container, containerStyle]}>
-      <View style={styles.dotsContainer}>
-        {Array.from({ length: totalItems }).map((_, index) => {
-          // Create a simple animated dot
-          if (scrollX) {
-            // Basic input range for the current position
-            const inputRange = [
-              (index - 1) * totalItemWidth,
-              index * totalItemWidth,
-              (index + 1) * totalItemWidth
-            ];
-            
-            // Simple scale animation
-            const scale = scrollX.interpolate({
-              inputRange,
-              outputRange: isLineStyle ? [1, 1.7, 1] : [1, 1.3, 1],
-              extrapolate: 'clamp',
-            });
-            
-            // Simple opacity animation
-            const opacity = scrollX.interpolate({
-              inputRange,
-              outputRange: [0.4, 1, 0.4],
-              extrapolate: 'clamp',
-            });
-            
-            return (
-              <TouchableOpacity 
-                key={`dot-${index}`}
-                activeOpacity={0.7}
-                onPress={() => handleDotPress(index)}
-                style={styles.dotTouchable}
-              >
-                <Animated.View 
-                  style={[
-                    styles.dot, 
-                    isLineStyle && styles.lineDot,
-                    { 
-                      transform: isLineStyle
-                        ? [{ scaleX: scale }] 
-                        : [{ scale }],
-                      opacity,
-                      backgroundColor: index === currentIndex 
-                        ? dotColor 
-                        : 'rgba(255, 255, 255, 0.3)'
-                    }
-                  ]}
-                />
-              </TouchableOpacity>
-            );
-          } else {
-            // Simple static dot
-            return (
-              <TouchableOpacity 
-                key={`dot-${index}`}
-                activeOpacity={0.7}
-                onPress={() => handleDotPress(index)}
-                style={styles.dotTouchable}
-              >
-                <View 
-                  style={[
-                    styles.dot, 
-                    isLineStyle && styles.lineDot,
-                    { 
-                      backgroundColor: index === currentIndex 
-                        ? dotColor 
-                        : 'rgba(255, 255, 255, 0.3)'
-                    }
-                  ]} 
-                />
-              </TouchableOpacity>
-            );
-          }
-        })}
-      </View>
+    <Pressable onPress={() => onPress?.(index)} hitSlop={10} style={styles.hit}>
+      <Animated.View style={[styles.dot, { shadowColor: color }, animatedStyle]} />
+    </Pressable>
+  );
+};
+
+const Pagination = ({ currentIndex, totalItems, onPageChange, color = '#9ccadf' }: PaginationProps) => {
+  if (totalItems <= 1) return null;
+
+  return (
+    <View style={styles.container}>
+      {Array.from({ length: totalItems }).map((_, i) => (
+        <Dot key={i} index={i} active={i === currentIndex} color={color} onPress={onPageChange} />
+      ))}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  dotsContainer: {
     flexDirection: 'row',
-    justifyContent: 'center',
     alignItems: 'center',
-    height: 20,
+    justifyContent: 'center',
+    paddingVertical: 16,
   },
-  dotTouchable: {
-    padding: 6,
-    marginHorizontal: 3,
+  hit: {
+    paddingHorizontal: 3,
   },
   dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#9ccadf',
+    height: DOT,
+    borderRadius: DOT / 2,
+    // Glow (iOS): shadowOpacity is animated 0 → on; inactive dots have no glow.
+    shadowOffset: { width: 0, height: 0 },
+    shadowRadius: 4,
   },
-  lineDot: {
-    width: 12, // More modest width
-    height: 3.5, // Slightly taller than original
-    borderRadius: 1.75, // Rounded edges
-  }
 });
 
 export default React.memo(Pagination);

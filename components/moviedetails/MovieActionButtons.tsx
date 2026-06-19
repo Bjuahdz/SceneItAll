@@ -2,9 +2,22 @@ import { View, TouchableOpacity, Text, StyleSheet, Animated } from 'react-native
 import { Ionicons, MaterialCommunityIcons, AntDesign } from '@expo/vector-icons';
 import React, { useState, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
+import { MovieActionButtonsProps } from '@/interfaces/interfaces';
 
-const FavoriteButton = ({ onPress, isFavorite }) => {
-  const [particles, setParticles] = useState([]);
+interface Particle {
+  id: number;
+  animation: Animated.ValueXY;
+  opacity: Animated.Value;
+  scale: Animated.Value;
+}
+
+interface FavoriteButtonProps {
+  onPress: () => void;
+  isFavorite: boolean;
+}
+
+const FavoriteButton = ({ onPress, isFavorite }: FavoriteButtonProps) => {
+  const [particles, setParticles] = useState<Particle[]>([]);
   const rotateAnim = useRef(new Animated.Value(0)).current;
   const bounceAnim = useRef(new Animated.Value(1)).current;
 
@@ -190,11 +203,15 @@ const MovieActionButtons = ({
     onDislike();
   };
 
-  const handleFavorite = () => {
+  const handleFavorite = async () => {
     if (!isFavorite && isDisliked) {
       onStateChange?.({ isLiked, isDisliked: false, isFavorite: true });
     }
     onFavorite();
+  };
+
+  const handleWatch = async () => {
+    onWatch();
   };
 
   return (
@@ -247,7 +264,7 @@ const MovieActionButtons = ({
 
       <TouchableOpacity 
         style={styles.watchButton}
-        onPress={onWatch}
+        onPress={handleWatch}
         activeOpacity={0.7}
       >
         <Ionicons name="play" size={20} color="#000000" />
