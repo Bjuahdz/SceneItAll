@@ -1,4 +1,5 @@
 import { Client, Databases, ID, Query } from "react-native-appwrite";
+import { Movie, TrendingMovie } from "@/interfaces/interfaces";
 
 const DATABASE_ID = process.env.EXPO_PUBLIC_APPWRITE_DATABASE_ID!;
 const COLLECTION_ID = process.env.EXPO_PUBLIC_APPWRITE_COLLECTION_ID!;

@@ -1,3 +1,5 @@
+import type { MovieDetails, MovieVideo } from '@/interfaces/interfaces';
+
 export const TMDB_CONFIG={
     BASE_URL:'https://api.themoviedb.org/3', 
     API_KEY: process.env.EXPO_PUBLIC_MOVIE_API_KEY,
@@ -7,6 +9,9 @@ export const TMDB_CONFIG={
     }
 }
 
+const uniqueByMovieId = <T extends { id: number }>(movies: T[]): T[] => (
+  Array.from(new Map(movies.map(movie => [movie.id, movie])).values())
+);
 
 //Fetches movies for the movie card section and the search page
 export const fetchMovies = async ({ query }: { query: string }) => {
@@ -30,7 +35,8 @@ export const fetchMovies = async ({ query }: { query: string }) => {
     throw error;
   }
 };
-//Fetches the top 5 movies for the hero poster: based on popularity and release year
+// Fetches the most popular recent movies for the hero carousel. Only movies that have
+// a TEXTLESS (no-language) poster are kept, so the hero never shows baked-in titles.
 export const fetchNowPlayingMovies = async () => {
   try {
     // Get current date and date from 2 months ago
@@ -68,25 +74,18 @@ export const fetchNowPlayingMovies = async () => {
       )
       .slice(0, 7);
 
+    // Attach clean artwork and keep ONLY movies that have a textless poster — no
+    // fallback to the default `poster_path` (it usually has the title baked in, which
+    // is exactly what we don't want in the hero).
     const moviesWithImages = await Promise.all(
       filteredMovies.map(async (movie: any) => {
-        try {
-          // Use the trending-specific function instead
-          const imageData = await fetchTrendingMovieImages(movie.id.toString());
-          
-          return {
-            ...movie,
-            poster_path: imageData.poster_path || movie.poster_path,
-            logo_path: imageData.logo_path
-          };
-        } catch (error) {
-          console.error(`Error fetching images for movie ${movie.id}:`, error);
-          return movie;
-        }
+        const { poster, logo } = await fetchMovieImages(movie.id.toString());
+        if (!poster) return null;
+        return { ...movie, poster_path: poster, logo_path: logo };
       })
     );
 
-    return moviesWithImages;
+    return moviesWithImages.filter((movie: any) => movie !== null);
   } catch (error) {
     console.error('Error fetching popular movies:', error);
     throw error;
@@ -200,72 +199,28 @@ export const fetchMovieDetails = async (movieId: string): Promise<MovieDetails> 
   }
 };
 
-// Modified to fetch posters instead of backdrops for the hero section
-export const fetchMovieImages = async (movieId: string) => {
-  try {
-    const response = await fetch(
-      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images`,
-      {
-        method: 'GET',
-        headers: TMDB_CONFIG.headers,
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const posters = data.posters || [];
-    const logos = data.logos || [];
-    
-    // Filter posters to ensure they have no language text
-    const cleanPosters = posters.filter((poster: any) => !poster.iso_639_1);
-    const cleanLogos = logos.filter((logo: any) => !logo.iso_639_1 || logo.iso_639_1 === 'en');
-    
-    // Select poster based on the rules:
-    // - If more than 10 posters available, get the 5th one
-    // - If even number of posters, get the last one
-    // - If odd number, get the 3rd one (if available)
-    let selectedPoster = null;
-    
-    if (cleanPosters.length > 0) {
-      if (cleanPosters.length > 10) {
-        // More than 10 posters available, get the 5th one
-        selectedPoster = cleanPosters[4].file_path; // 0-based index, so 4 is the 5th poster
-      } else if (cleanPosters.length % 2 === 0) {
-        // Even number - get the last poster
-        selectedPoster = cleanPosters[cleanPosters.length - 1].file_path;
-      } else {
-        // Odd number - get the 3rd poster if available, otherwise get the first
-        selectedPoster = cleanPosters.length >= 3 
-          ? cleanPosters[2].file_path 
-          : cleanPosters[0].file_path;
-      }
-    }
-    
-    return {
-      // Use poster for the hero section instead of backdrop
-      backdrop: selectedPoster, 
-      poster: cleanPosters.length > 0 ? cleanPosters[0].file_path : null,
-      logo: cleanLogos.length > 0 ? cleanLogos[0].file_path : null
-    };
-
-  } catch (error) {
-    console.error('Error fetching movie images:', error);
-    return { backdrop: null, poster: null, logo: null };
-  }
+// ── Movie images ────────────────────────────────────────────────────────────
+// Single source of truth for a movie's artwork. The hero + cards must only ever
+// show TEXTLESS (no-language) posters, with an English-or-textless title logo on
+// top. Requesting `include_image_language=en,null` makes TMDB return just those
+// variants instead of every localized poster — smaller, faster responses, and one
+// shared cache for every screen that needs artwork.
+export type MovieImages = {
+  poster: string | null;    // primary textless poster — hero + cards (best-voted)
+  altPoster: string | null; // a DIFFERENT textless poster for the detail view, so it
+                            // doesn't just repeat the cover (falls back to `poster`)
+  logo: string | null;      // english / no-language title logo file_path
 };
 
-// Separate function for trending/hero section to use different images
-export const fetchTrendingMovieImages = async (movieId: string) => {
+export const fetchMovieImages = async (movieId: string): Promise<MovieImages> => {
+  if (imageCache.has(movieId) && isCacheValid(movieId)) {
+    return imageCache.get(movieId)!;
+  }
+
   try {
     const response = await fetch(
-      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images`,
-      {
-        method: 'GET',
-        headers: TMDB_CONFIG.headers,
-      }
+      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images?include_image_language=en,null`,
+      { method: 'GET', headers: TMDB_CONFIG.headers }
     );
 
     if (!response.ok) {
@@ -273,25 +228,30 @@ export const fetchTrendingMovieImages = async (movieId: string) => {
     }
 
     const data = await response.json();
-    const posters = data.posters || [];
-    const logos = data.logos || [];
-    
-    // Clean posters (no language)
-    const cleanPosters = posters.filter((poster: any) => !poster.iso_639_1);
-    
-    // For trending, always use the first clean poster (different from detail page)
-    const trendingPoster = cleanPosters.length > 0 ? cleanPosters[0].file_path : null;
-    
-    // Get movie logos (English or no language)
-    const cleanLogos = logos.filter((logo: any) => !logo.iso_639_1 || logo.iso_639_1 === 'en');
-    
-    return {
-      poster_path: trendingPoster,
-      logo_path: cleanLogos.length > 0 ? cleanLogos[0].file_path : null
+
+    // All textless posters, in TMDB's vote order (best first). This one request
+    // already contains every no-language poster, so we can hand out a primary AND an
+    // alternate with zero extra API calls. Language posters are ignored (baked-in text).
+    const posters: string[] = (data.posters || [])
+      .filter((p: any) => !p.iso_639_1)
+      .map((p: any) => p.file_path);
+
+    // Logo: prefer no-language, else an English one (still clean over the poster).
+    const logo =
+      (data.logos || []).find((l: any) => !l.iso_639_1 || l.iso_639_1 === 'en')
+        ?.file_path ?? null;
+
+    const result: MovieImages = {
+      poster: posters[0] ?? null,
+      // Second-best poster for variety on the detail page; if there's only one, reuse it.
+      altPoster: posters[1] ?? posters[0] ?? null,
+      logo,
     };
+    setImageCache(movieId, result);
+    return result;
   } catch (error) {
     console.error(`Error fetching images for movie ${movieId}:`, error);
-    return { poster_path: null, logo_path: null };
+    return { poster: null, altPoster: null, logo: null };
   }
 };
 
@@ -484,29 +444,52 @@ export const fetchUpcomingMovies = async (limit: number = 5) => {
   }
 };
 
-// Updated function for Cash Cow movies - no fake data, prioritize by year and finances
-export const fetchCashCowMovies = async (limit: number = 8) => {
+// ── Box office (Cash Cows / Money Pits) ──────────────────────────────────────
+// Budget & revenue live ONLY on the /movie/{id} detail endpoint, so every candidate
+// costs one detail call. To stay lean we (1) keep the candidate pool small, (2) fetch
+// NO artwork — the Box Office chart needs only title / date / budget / revenue — and
+// (3) cache the finished list so revisiting the tab doesn't re-scan.
+const SECTION_CACHE_DURATION = 60 * 60 * 1000; // 60 minutes
+const sectionCache = new Map<string, { data: any[]; expiry: number }>();
+
+const getSection = (key: string): any[] | null => {
+  const hit = sectionCache.get(key);
+  return hit && Date.now() < hit.expiry ? hit.data : null;
+};
+
+const setSection = (key: string, data: any[]) => {
+  sectionCache.set(key, { data, expiry: Date.now() + SECTION_CACHE_DURATION });
+};
+
+// (Box Office no longer fetches title logos — the chart needs no artwork. The shared
+// fetchMovieImages cache still serves the hero, cards, and detail pages.)
+
+// Cash Cows — biggest box-office winners (revenue well above budget).
+export const fetchCashCowMovies = async (limit: number = 6) => {
+  const cached = getSection(`cashCow:${limit}`);
+  if (cached) return cached;
+
   try {
-    // Increase the time range to 2 years to find more candidates
-    const twoYearsAgo = new Date();
-    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
-    
-    // Get current year for sorting priority
-    const currentYear = new Date().getFullYear();
+    // Look back 1 year — recent box office only.
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
     
     // Format date to YYYY-MM-DD as required by TMDB API
-    const minDate = twoYearsAgo.toISOString().split('T')[0];
+    const minDate = oneYearAgo.toISOString().split('T')[0];
     
     // Fetch multiple pages to ensure we get enough candidates
     let allMovies: any[] = [];
     
-    // Fetch up to 4 pages to get a larger candidate pool
-    for (let page = 1; page <= 4; page++) {
+    // Highest box-office earners first → almost all are profitable, so a small
+    // candidate pool is enough to fill the section.
+    const today = new Date().toISOString().split('T')[0];
+    for (let page = 1; page <= 3 && allMovies.length < limit * 4; page++) {
       const response = await fetch(
         `${TMDB_CONFIG.BASE_URL}/discover/movie?` +
-        `sort_by=primary_release_date.desc&` + // Sort by most recent first
-        `vote_count.gte=180&` + // Ensure sufficient votes
+        `sort_by=revenue.desc&` + // Biggest box-office earners first
+        `vote_count.gte=200&` + // Ensure sufficient votes
         `primary_release_date.gte=${minDate}&` +
+        `primary_release_date.lte=${today}&` + // Skip unreleased (no revenue yet)
         `page=${page}`,
         {
           method: 'GET',
@@ -521,64 +504,40 @@ export const fetchCashCowMovies = async (limit: number = 8) => {
       const data = await response.json();
       allMovies = [...allMovies, ...data.results];
       
-      // If we have enough results, stop fetching more pages
-      if (allMovies.length >= 80) {
+      // Stop once we have a big enough candidate pool to fill the section.
+      if (allMovies.length >= limit * 4) {
         break;
       }
     }
     
-    // Get detailed information to check budget and revenue
-    const detailedMoviesPromises = allMovies.map(async (movie: any) => {
-      try {
-        const [detailsResponse, imagesResponse] = await Promise.all([
-          fetch(
-            `${TMDB_CONFIG.BASE_URL}/movie/${movie.id}`,
-            {
-              method: 'GET',
-              headers: TMDB_CONFIG.headers,
-            }
-          ),
-          fetch(
-            `${TMDB_CONFIG.BASE_URL}/movie/${movie.id}/images`,
-            {
-              method: 'GET',
-              headers: TMDB_CONFIG.headers,
-            }
-          )
-        ]);
+    const uniqueMovies = uniqueByMovieId(allMovies).slice(0, limit * 4);
 
-        if (!detailsResponse.ok || !imagesResponse.ok) {
+    // Get detailed information to check budget and revenue
+    const detailedMoviesPromises = uniqueMovies.map(async (movie: any) => {
+      try {
+        const detailsResponse = await fetch(
+          `${TMDB_CONFIG.BASE_URL}/movie/${movie.id}`,
+          {
+            method: 'GET',
+            headers: TMDB_CONFIG.headers,
+          }
+        );
+
+        if (!detailsResponse.ok) {
           return null;
         }
 
-        const [details, imagesData] = await Promise.all([
-          detailsResponse.json(),
-          imagesResponse.json()
-        ]);
-        
-        // Get movie logos (English or no language)
-        const logos = (imagesData.logos || [])
-          .filter((logo: any) => !logo.iso_639_1 || logo.iso_639_1 === 'en');
-        
-        // Extract release year for sorting
-        const releaseYear = new Date(movie.release_date).getFullYear();
-        
-        // Ensure we have both budget and revenue data
+        const details = await detailsResponse.json();
+
+        // Cash cows = earned well over their budget. Artwork is added later for just
+        // the few we display, so we don't fetch images for every candidate here.
         if (details.budget > 1000000 && details.revenue > 1000000) {
-          const profit = details.revenue - details.budget;
-          // Only include profitable movies (revenue > budget)
           if (details.revenue > details.budget * 1.3) { // At least 30% profit
             return {
               ...movie,
               budget: details.budget,
               revenue: details.revenue,
-              profit: profit,
-              profitRatio: details.revenue / details.budget,
-              logo_path: logos.length > 0 ? logos[0].file_path : null,
               backdrop_path: movie.backdrop_path || details.backdrop_path,
-              releaseYear: releaseYear,
-              yearPriority: releaseYear === currentYear ? 1 : 
-                           releaseYear === currentYear - 1 ? 2 : 3
             };
           }
         }
@@ -589,31 +548,18 @@ export const fetchCashCowMovies = async (limit: number = 8) => {
       }
     });
     
-    // Wait for all promises to resolve
     const detailedMovies = await Promise.all(detailedMoviesPromises);
-    
-    // First filter out null values
-    const validMovies = detailedMovies.filter(movie => movie !== null);
-    
-    // Calculate raw profit amount and ratio for sorting
-    const moviesWithProfit = validMovies.map((movie: any) => ({
-      ...movie,
-      absoluteProfit: movie.revenue - movie.budget,
-      profitRatio: movie.revenue / movie.budget
-    }));
-    
-    // Sort movies - first by year, then by absolute profit amount
-    const sortedMovies = moviesWithProfit.sort((a: any, b: any) => {
-      // First sort by year priority
-      if (a.yearPriority !== b.yearPriority) {
-        return a.yearPriority - b.yearPriority;
-      }
-      
-      // If same year priority, sort by absolute profit (highest first)
-      return b.absoluteProfit - a.absoluteProfit;
-    });
-    
-    return sortedMovies.slice(0, Math.min(limit, sortedMovies.length));
+
+    // Rank purely by the size of the profit gap — the biggest cash cows of the past
+    // year, regardless of exactly when in the year they released.
+    const ranked = detailedMovies
+      .filter((movie: any) => movie !== null)
+      .sort((a: any, b: any) => (b.revenue - b.budget) - (a.revenue - a.budget))
+      .slice(0, limit);
+
+    // No artwork fetch — the chart needs only title / date / budget / revenue.
+    setSection(`cashCow:${limit}`, ranked);
+    return ranked;
     
   } catch (error) {
     console.error('Error fetching cash cow movies:', error);
@@ -621,29 +567,33 @@ export const fetchCashCowMovies = async (limit: number = 8) => {
   }
 };
 
-// Updated function for Money Pit movies - no fake data, prioritize by year and finances
-export const fetchMoneyPitMovies = async (limit: number = 8) => {
+// Money Pits — biggest box-office flops (revenue well below budget).
+export const fetchMoneyPitMovies = async (limit: number = 6) => {
+  const cached = getSection(`moneyPit:${limit}`);
+  if (cached) return cached;
+
   try {
-    // Increase the time range to 2 years to find more candidates
-    const twoYearsAgo = new Date();
-    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
-    
-    // Get current year for sorting priority
-    const currentYear = new Date().getFullYear();
+    // Look back 1 year — recent box office only.
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
     
     // Format date to YYYY-MM-DD as required by TMDB API
-    const minDate = twoYearsAgo.toISOString().split('T')[0];
+    const minDate = oneYearAgo.toISOString().split('T')[0];
     
     // Fetch multiple pages to ensure we get enough candidates
     let allResults: any[] = [];
     
-    // Fetch up to 5 pages to get a larger candidate pool
-    for (let page = 1; page <= 5; page++) {
+    // No "biggest loss" sort exists, so scan recent, well-known theatrical releases
+    // (enough votes to have reliable budget/revenue) and let the detail check below
+    // surface the flops. Capped so we never fan out to hundreds of detail calls.
+    const today = new Date().toISOString().split('T')[0];
+    for (let page = 1; page <= 6 && allResults.length < limit * 12; page++) {
       const response = await fetch(
         `${TMDB_CONFIG.BASE_URL}/discover/movie?` +
-        `sort_by=primary_release_date.desc&` + // Sort by most recent first
-        `vote_count.gte=50&` + // Keep minimum votes
+        `sort_by=primary_release_date.desc&` + // Most recent first
+        `vote_count.gte=100&` + // Well-known enough to have budget/revenue data
         `primary_release_date.gte=${minDate}&` +
+        `primary_release_date.lte=${today}&` + // Skip unreleased (no revenue yet)
         `page=${page}`,
         {
           method: 'GET',
@@ -658,65 +608,41 @@ export const fetchMoneyPitMovies = async (limit: number = 8) => {
       const data = await response.json();
       allResults = [...allResults, ...data.results];
       
-      // If we have enough results, stop fetching more pages
-      if (allResults.length >= 100) { // Higher number to find enough money pits
+      // Stop once the candidate pool is big enough to fill the section.
+      if (allResults.length >= limit * 12) {
         break;
       }
     }
     
+    const uniqueMovies = uniqueByMovieId(allResults).slice(0, limit * 12);
+
     // Process a larger set of movies to find enough that meet criteria
     const moviesWithDetails = await Promise.all(
-      allResults.map(async (movie: any) => {
+      uniqueMovies.map(async (movie: any) => {
         try {
-          const [detailsResponse, imagesResponse] = await Promise.all([
-            fetch(
-              `${TMDB_CONFIG.BASE_URL}/movie/${movie.id}`,
-              {
-                method: 'GET',
-                headers: TMDB_CONFIG.headers,
-              }
-            ),
-            fetch(
-              `${TMDB_CONFIG.BASE_URL}/movie/${movie.id}/images`,
-              {
-                method: 'GET',
-                headers: TMDB_CONFIG.headers,
-              }
-            )
-          ]);
+          const detailsResponse = await fetch(
+            `${TMDB_CONFIG.BASE_URL}/movie/${movie.id}`,
+            {
+              method: 'GET',
+              headers: TMDB_CONFIG.headers,
+            }
+          );
 
-          if (!detailsResponse.ok || !imagesResponse.ok) {
+          if (!detailsResponse.ok) {
             return null;
           }
 
-          const [details, imagesData] = await Promise.all([
-            detailsResponse.json(),
-            imagesResponse.json()
-          ]);
-          
-          // Get movie logos (English or no language)
-          const logos = (imagesData.logos || [])
-            .filter((logo: any) => !logo.iso_639_1 || logo.iso_639_1 === 'en');
-          
-          // Extract release year for sorting
-          const releaseYear = new Date(movie.release_date).getFullYear();
-          
-          // Only include if both budget and revenue are known and significant
+          const details = await detailsResponse.json();
+
+          // Money pits = took in well under their budget. Artwork is added later for
+          // just the few we display, so we don't fetch images for every candidate here.
           if (details.budget > 1000000 && details.revenue > 0) {
-            const profit = details.revenue - details.budget;
-            // Only include if it made a significant loss (revenue < budget)
             if (details.revenue < details.budget * 0.85) { // At least 15% loss
               return {
                 ...movie,
                 budget: details.budget,
                 revenue: details.revenue,
-                profit: profit,
-                lossRatio: details.revenue / details.budget,
-                logo_path: logos.length > 0 ? logos[0].file_path : null,
                 backdrop_path: movie.backdrop_path || details.backdrop_path,
-                releaseYear: releaseYear,
-                yearPriority: releaseYear === currentYear ? 1 : 
-                             releaseYear === currentYear - 1 ? 2 : 3
               };
             }
           }
@@ -728,32 +654,50 @@ export const fetchMoneyPitMovies = async (limit: number = 8) => {
       })
     );
     
-    // Filter out null results 
-    const validMovies = moviesWithDetails.filter(movie => movie !== null);
-    
-    // Calculate absolute loss for sorting
-    const moviesWithLoss = validMovies.map((movie: any) => ({
-      ...movie,
-      absoluteLoss: movie.budget - movie.revenue,
-      lossRatio: movie.revenue / movie.budget
-    }));
-    
-    // Sort movies - first by year, then by absolute loss amount
-    const sortedMovies = moviesWithLoss.sort((a: any, b: any) => {
-      // First sort by year priority
-      if (a.yearPriority !== b.yearPriority) {
-        return a.yearPriority - b.yearPriority;
-      }
-      
-      // If same year priority, sort by absolute loss (highest first)
-      return b.absoluteLoss - a.absoluteLoss;
-    });
-    
-    return sortedMovies.slice(0, Math.min(limit, sortedMovies.length));
+    // Rank purely by the size of the loss gap — the biggest flops of the past year.
+    const ranked = moviesWithDetails
+      .filter((movie: any) => movie !== null)
+      .sort((a: any, b: any) => (b.budget - b.revenue) - (a.budget - a.revenue))
+      .slice(0, limit);
+
+    // No artwork fetch — the chart needs only title / date / budget / revenue.
+    setSection(`moneyPit:${limit}`, ranked);
+    return ranked;
     
   } catch (error) {
     console.error('Error fetching money pit movies:', error);
     throw error;
   }
 };
+
+// Centralized image cache to prevent redundant API calls
+const imageCache = new Map<string, MovieImages>();
+const cacheExpiry = new Map<string, number>();
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
+// Helper function to check if cache is valid
+const isCacheValid = (movieId: string): boolean => {
+  const expiry = cacheExpiry.get(movieId);
+  return expiry ? Date.now() < expiry : false;
+};
+
+// Helper function to set cache
+const setImageCache = (movieId: string, data: MovieImages) => {
+  imageCache.set(movieId, data);
+  cacheExpiry.set(movieId, Date.now() + CACHE_DURATION);
+};
+
+// Clean up expired cache entries
+const cleanupExpiredCache = () => {
+  const now = Date.now();
+  for (const [movieId, expiry] of cacheExpiry.entries()) {
+    if (now > expiry) {
+      imageCache.delete(movieId);
+      cacheExpiry.delete(movieId);
+    }
+  }
+};
+
+// Run cleanup every 5 minutes
+setInterval(cleanupExpiredCache, 5 * 60 * 1000);
 
