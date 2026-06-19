@@ -2,6 +2,7 @@ import { Link } from "expo-router";
 import { Text, Image, TouchableOpacity, View } from "react-native";
 
 import { icons } from "@/constants/icons";
+import { Movie } from "@/interfaces/interfaces";
 
 
 
