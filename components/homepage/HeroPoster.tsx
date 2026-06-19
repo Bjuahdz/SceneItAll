@@ -55,9 +55,6 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
   const flatListRef = useRef<FlatList>(null);
   const opacityValuesRef = useRef<Record<number, Animated.Value>>({});
   
-  // Replace prevIndexRef and posterOpacity with a simpler approach
-  const posterOpacity = useRef(new Animated.Value(1)).current;
-  
   // Add a ref to track which images we've started preloading
   const preloadedImagesRef = useRef<Set<string>>(new Set());
 
@@ -93,7 +90,7 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
     
     // Preload images
     if (imagesToPreload.length > 0) {
-      Image.prefetch(imagesToPreload);
+      Image.prefetch(imagesToPreload.map(img => img.uri));
     }
   }, [topMovies]);
 
@@ -113,22 +110,20 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
         preloadImages(1);
       }
       
-      // Only fetch data for the first movie initially
-      prefetchMovieData(topMovies[0].id);
+      // Only fetch data for the first movie initially if not already fetched
+      if (!dataFetchedRef.current.has(topMovies[0].id)) {
+        prefetchMovieData(topMovies[0].id);
+      }
     }
-  }, []);
+  }, [topMovies]);
 
   // Use a separate effect to monitor active index changes
   useEffect(() => {
-    // When active index changes, immediately reset opacity to 0 (no animation)
-    posterOpacity.setValue(0);
-    
-    // Then fade in from 0 to 1
-    Animated.timing(posterOpacity, {
-      toValue: 1,
-      duration: 700, // Adjust fade-in duration as needed
-      useNativeDriver: true,
-    }).start();
+    // The poster crossfade is handled by expo-image's `transition` when the source
+    // changes (see heroPoster below) — NOT an RN Animated opacity. A native-driven
+    // Animated.timing was unreliable on the New Architecture (Expo Go SDK 54) and would
+    // sometimes get stuck at opacity 0, leaving a cover dark until another swipe. The
+    // built-in crossfade is consistent and also removes the dark gap mid-swipe.
 
     // Prefetch data for current and next movie if not already fetched
     if (topMovies[activeIndex] && !dataFetchedRef.current.has(topMovies[activeIndex].id)) {
@@ -222,73 +217,31 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
     }));
   };
 
-  // Memoize pagination indicator to avoid re-renders
+  // Keep the number and underline on the same source of truth so they cannot drift apart.
   const paginationIndicator = useMemo(() => (
     <View style={styles.paginationContainer}>
       {topMovies.map((_, index) => {
-        // Calculate values for scaling instead of width changes (better performance)
-        const scaleX = scrollX.interpolate({
-          inputRange: [
-            (index - 1) * SCREEN_WIDTH,
-            index * SCREEN_WIDTH,
-            (index + 1) * SCREEN_WIDTH
-          ],
-          outputRange: [1, 1.6, 1],
-          extrapolate: 'clamp',
-        });
-        
-        const opacity = scrollX.interpolate({
-          inputRange: [
-            (index - 1) * SCREEN_WIDTH,
-            index * SCREEN_WIDTH,
-            (index + 1) * SCREEN_WIDTH
-          ],
-          outputRange: [0.5, 1, 0.5],
-          extrapolate: 'clamp',
-        });
-        
-        const backgroundColor = scrollX.interpolate({
-          inputRange: [
-            (index - 1) * SCREEN_WIDTH,
-            index * SCREEN_WIDTH,
-            (index + 1) * SCREEN_WIDTH
-          ],
-          outputRange: [
-            'rgba(255, 255, 255, 0.3)',
-            '#9ccadf',
-            'rgba(255, 255, 255, 0.3)'
-          ],
-          extrapolate: 'clamp',
-        });
-        
+        const isActive = index === activeIndex;
+
         return (
           <View key={`indicator-${index}`} style={styles.indicatorWrapper}>
             <Animated.View
               style={[
                 styles.paginationLine,
-                {
-                  backgroundColor,
-                  opacity,
-                  transform: [{ scaleX }],
-                }
+                isActive ? styles.activePaginationLine : styles.inactivePaginationLine,
               ]}
             />
-            
-            <Animated.View 
-              style={[
-                styles.activeNumberContainer,
-                {
-                  opacity: index === activeIndex ? opacity : 0,
-                }
-              ]}
-            >
-              <Text style={styles.activeNumberText}>{index + 1}</Text>
-            </Animated.View>
+
+            {isActive && (
+              <View style={styles.activeNumberContainer}>
+                <Text style={styles.activeNumberText}>{index + 1}</Text>
+              </View>
+            )}
           </View>
         );
       })}
     </View>
-  ), [topMovies.length, scrollX, activeIndex]);
+  ), [topMovies.length, activeIndex]);
 
   // Memoize the current poster to prevent unnecessary re-renders
   const heroPoster = useMemo(() => {
@@ -299,15 +252,18 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
     const imageUrl = `https://image.tmdb.org/t/p/w780${currentMovie.poster_path}`;
     
     return (
-      <Animated.View style={[styles.posterContainer, { opacity: posterOpacity }]}>
+      <View style={styles.posterContainer}>
         <Image
           source={{ uri: imageUrl }}
           style={styles.posterImage}
           contentFit="cover" 
           placeholder={PLACEHOLDER_BLURHASH}
-          transition={100}
+          // Built-in crossfade from the previous poster to the new one when `source`
+          // changes — reliable on Fabric and leaves no dark gap. No recyclingKey here:
+          // a changing key makes expo-image reset to the placeholder (a dark flash)
+          // instead of transitioning in place. Tune this duration to taste.
+          transition={300}
           cachePolicy="memory-disk"
-          recyclingKey={`hero-${currentMovie.id}`}
         />
         <LinearGradient
           colors={[
@@ -320,9 +276,9 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
           locations={[0, 0.3, 0.6, 0.8, 1]}
           style={styles.gradient}
         />
-      </Animated.View>
+      </View>
     );
-  }, [topMovies, activeIndex, posterOpacity]);
+  }, [topMovies, activeIndex]);
 
   // Format date to "MMM YYYY" (e.g., "JUN 2023")
   const formatReleaseDate = useMemo(() => (dateString: string) => {
@@ -332,7 +288,8 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
     return `${month} ${year}`;
   }, []);
 
-  const renderItem = ({ item: movie }: { item: Movie }) => {
+  const renderItem = ({ item }: { item: any }) => {
+    const movie = item as Movie;
     // Check if we have trailers for this movie
     const hasTrailer = trailers[movie.id]?.length > 0;
     const isSynopsisExpanded = expandedSynopsis[movie.id] || false;
@@ -477,7 +434,7 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
         onScroll={handleScroll}
         scrollEventThrottle={16}
         renderItem={renderItem}
-        keyExtractor={(item) => item.id.toString()}
+        keyExtractor={(item) => (item as Movie).id.toString()}
         decelerationRate={0.85}
         style={styles.flatList}
         pointerEvents="box-none"
@@ -494,7 +451,7 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
       />
       {paginationIndicator}
       
-      {showTrailer && activeTrailerId && (
+      {showTrailer && activeTrailerId && topMovies[activeIndex] && (
         <TrailerPlayer 
           videoId={activeTrailerId} 
           onClose={handleCloseTrailer} 
@@ -687,6 +644,14 @@ const styles = StyleSheet.create({
     height: 3,
     borderRadius: 1.5,
     backgroundColor: '#9ccadf',
+  },
+  activePaginationLine: {
+    opacity: 1,
+    transform: [{ scaleX: 1.6 }],
+  },
+  inactivePaginationLine: {
+    opacity: 0.4,
+    transform: [{ scaleX: 1 }],
   },
   indicatorWrapper: {
     position: 'relative',
