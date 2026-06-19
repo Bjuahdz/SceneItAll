@@ -1,5 +1,7 @@
 import { View, Animated, Dimensions, ActivityIndicator, Text, Platform, RefreshControl, ScrollView, TouchableOpacity, StyleSheet, StatusBar } from 'react-native'
 import { BlurView } from 'expo-blur';
+import { Ionicons } from '@expo/vector-icons';
+import ReAnimated, { FadeInDown, FadeOutUp } from 'react-native-reanimated';
 import React, { useState, useRef, useEffect } from 'react'
 import { useLocalSearchParams } from 'expo-router';
 import useFetch from '@/services/useFetch';
@@ -35,21 +37,12 @@ const MovieDetails = () => {
   const scrollY = useRef(new Animated.Value(0)).current;
   const { data: movie, loading } = useFetch(() => fetchMovieDetails(id as string));
   const { height } = Dimensions.get('window');
-  const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<TabType>('details');
-  const [showSynopsis, setShowSynopsis] = useState(false);
   const [synopsisVisible, setSynopsisVisible] = useState(false);
-  const [isAnimating, setIsAnimating] = useState(false);
   const [trailers, setTrailers] = useState<MovieVideo[]>([]);
   const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
   const [posterFetched, setPosterFetched] = useState(false);
   const imageTransitionDuration = 0;
-  const [setIsOverviewExpanded] = useState(false);
-  const synopsisRef = useRef<View>(null);
-  const [synopsisHeight, setSynopsisHeight] = useState(0);
-  const [isSynopsisExpanded, setIsSynopsisExpanded] = useState(false);
-  const [isTextTruncated, setIsTextTruncated] = useState(false);
-  const textRef = useRef(null);
   const [headerHeight] = useState(Platform.select({
     ios: 80,
     android: 70,
@@ -120,8 +113,12 @@ const MovieDetails = () => {
     })
   };
   
-  // Debug the image fetching process
-  console.log("Current logo path:", images.logo);
+  // Debug the image fetching process - only log when logo changes
+  React.useEffect(() => {
+    if (images.logo) {
+      console.log("Current logo path:", images.logo);
+    }
+  }, [images.logo]);
   
   // Fetch images in parallel with movie details
   React.useEffect(() => {
@@ -136,7 +133,7 @@ const MovieDetails = () => {
           // Only set images if they're not already set
           if (!posterFetched) {
             setImages({
-              backdrop: movieImages.backdrop,
+              backdrop: movieImages.altPoster,
               logo: movieImages.logo
             });
             setPosterFetched(true);
@@ -160,51 +157,16 @@ const MovieDetails = () => {
     }
   }, [movie, images.backdrop]);
 
-  // Custom refresh handler for synopsis
-  const onRefresh = React.useCallback(async () => {
-    if (!synopsisVisible && !isAnimating) {
+  // Pull-to-reveal synopsis. Open/close animations are handled declaratively by
+  // Reanimated entering/exiting on the overlay itself — the old imperative
+  // Animated.parallel approach froze on the new architecture, leaving the overlay
+  // mounted but invisible until an unrelated re-render (e.g. a tab tap) repainted it.
+  const onRefresh = React.useCallback(() => {
+    if (!synopsisVisible) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      setShowSynopsis(true);
       setSynopsisVisible(true);
-      Animated.parallel([
-        Animated.spring(synopsisTranslateY, {
-          toValue: 0,
-          useNativeDriver: true,
-          tension: 50,
-          friction: 7
-        }),
-        Animated.timing(synopsisOpacity, {
-          toValue: 1,
-          duration: 200,
-          useNativeDriver: true
-        })
-      ]).start();
     }
-  }, [synopsisVisible, isAnimating]);
-
-  // Add handler for synopsis tab click
-  const handleSynopsisTabClick = () => {
-    if (synopsisVisible && !isAnimating) {
-      setIsAnimating(true);
-      Animated.parallel([
-        Animated.spring(synopsisTranslateY, {
-          toValue: -100,
-          useNativeDriver: true,
-          tension: 50,
-          friction: 7
-        }),
-        Animated.timing(synopsisOpacity, {
-          toValue: 0,
-          duration: 200,
-          useNativeDriver: true
-        })
-      ]).start(() => {
-        setSynopsisVisible(false);
-        setShowSynopsis(false);
-        setIsAnimating(false);
-      });
-    }
-  };
+  }, [synopsisVisible]);
 
   // Add these state handlers
   const [isLiked, setIsLiked] = useState(false);
@@ -281,39 +243,6 @@ const MovieDetails = () => {
     loadTrailers();
   }, [id]);
 
-  useEffect(() => {
-    if (movie?.overview) {
-      // Simple way to estimate if text will be more than 4 lines
-      const averageCharsPerLine = 35; // Approximate characters per line
-      const estimatedLines = movie.overview.length / averageCharsPerLine;
-      setIsTextTruncated(estimatedLines > 4);
-    }
-  }, [movie?.overview]);
-
-  const isSynopsisLong = (text: string) => {
-    // Calculate based on container width, font size, and average character width
-    const containerWidth = Dimensions.get('window').width - 72; // Account for padding and margins
-    const fontSize = 15;
-    const averageCharWidth = fontSize * 0.6; // Approximate width of a character
-    const charsPerLine = Math.floor(containerWidth / averageCharWidth);
-    
-    // Count words and estimate lines needed
-    const words = text.split(' ');
-    let currentLineLength = 0;
-    let lineCount = 0;
-
-    for (let word of words) {
-      if (currentLineLength + word.length > charsPerLine) {
-        lineCount++;
-        currentLineLength = word.length + 1; // +1 for the space
-      } else {
-        currentLineLength += word.length + 1; // +1 for the space
-      }
-    }
-
-    return lineCount > 4;
-  };
-
   // Add this new handler
   const handleStateChange = (newState: { isLiked: boolean; isDisliked: boolean; isFavorite: boolean }) => {
     setIsLiked(newState.isLiked);
@@ -321,26 +250,6 @@ const MovieDetails = () => {
     setIsFavorite(newState.isFavorite);
   };
 
-  // Optimize the synopsis and tabBar styles
-  const animatedStyles = React.useMemo(() => ({
-    tabBar: {
-      opacity: scrollY.interpolate({
-        inputRange: [-50, 0, 100],
-        outputRange: [0.3, 0.3, 1],
-        extrapolate: 'clamp'
-      }),
-      translateY: scrollY.interpolate({
-        inputRange: [-50, 0, 100],
-        outputRange: [30, 30, 0],
-        extrapolate: 'clamp'
-      })
-    }
-  }), [scrollY, height]);
-
-  // Add animation value for synopsis
-  const synopsisTranslateY = useRef(new Animated.Value(-100)).current;
-  const synopsisOpacity = useRef(new Animated.Value(0)).current;
-  
   // Add back the mainScrollViewRef
   const mainScrollViewRef = useRef<ScrollView>(null);
 
@@ -493,100 +402,40 @@ const MovieDetails = () => {
           />
         }
       >
-        {/* Synopsis Section - Only visible when pulled down */}
-        {showSynopsis && (
-          <Animated.View
-            style={{
-              position: 'absolute',
-              top: 85,
-              left: 16,
-              right: 16,
-              backgroundColor: 'rgba(15,15,20,0.98)',
-              padding: 16,
-              paddingTop: 20,
-              zIndex: 1000,
-              transform: [{
-                translateY: synopsisTranslateY
-              }],
-              opacity: synopsisOpacity,
-              borderRadius: 20,
-              shadowColor: '#000',
-              shadowOffset: {
-                width: 0,
-                height: 8,
-              },
-              shadowOpacity: 0.4,
-              shadowRadius: 12,
-              elevation: 12,
-              borderWidth: 1,
-              borderColor: 'rgba(255,255,255,0.08)',
-              overflow: 'hidden',
-              maxHeight: '60%',
-            }}
+        {/* Synopsis overlay — revealed by pull-down, dismissed via the close button.
+            Glass styling matches the floating tab bar (blur + tint + hairline border). */}
+        {synopsisVisible && (
+          <ReAnimated.View
+            entering={FadeInDown.springify().damping(18)}
+            exiting={FadeOutUp.duration(180)}
+            style={styles.synopsisOverlay}
           >
-            {/* Background Gradient */}
-            <LinearGradient
-              colors={['rgba(148,134,171,0.1)', 'rgba(148,134,171,0.05)', 'transparent']}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                height: '100%',
-                opacity: 0.5,
-              }}
-            />
-
-            {movie?.overview && (
-              <View>
-                <Text style={{
-                  color: 'rgba(255,255,255,0.85)',
-                  fontSize: 14,
-                  lineHeight: 20,
-                  textAlign: 'justify',
-                  letterSpacing: 0.2,
-                }}>
-                  {movie.overview}
-                </Text>
-              </View>
-            )}
-
-            {/* Synopsis Label Button */}
-            <TouchableOpacity
-              onPress={handleSynopsisTabClick}
-              style={{
-                marginTop: 16,
-                alignItems: 'center',
-                paddingVertical: 8,
-              }}
+            <BlurView
+              intensity={50}
+              tint="dark"
+              experimentalBlurMethod="dimezisBlurView"
+              style={styles.synopsisBlur}
             >
-              <View style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}>
-                <View style={{
-                  width: 40,
-                  height: 1,
-                  backgroundColor: 'rgba(255,255,255,0.2)',
-                }} />
-                <Text style={{
-                  color: 'rgba(255,255,255,0.7)',
-                  fontSize: 14,
-                  fontWeight: '600',
-                  letterSpacing: 0.5,
-                  paddingHorizontal: 12,
-                }}>
-                  Synopsis
-                </Text>
-                <View style={{
-                  width: 40,
-                  height: 1,
-                  backgroundColor: 'rgba(255,255,255,0.2)',
-                }} />
+              <View style={styles.synopsisHeader}>
+                <Text style={styles.synopsisTitle}>Synopsis</Text>
+                <TouchableOpacity
+                  onPress={() => setSynopsisVisible(false)}
+                  hitSlop={12}
+                  style={styles.synopsisClose}
+                >
+                  <Ionicons name="close" size={18} color="rgba(255,255,255,0.85)" />
+                </TouchableOpacity>
               </View>
-            </TouchableOpacity>
-          </Animated.View>
+
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                bounces={false}
+                style={styles.synopsisScroll}
+              >
+                <Text style={styles.synopsisText}>{movie?.overview}</Text>
+              </ScrollView>
+            </BlurView>
+          </ReAnimated.View>
         )}
 
         {/* Hero Section */}
@@ -824,14 +673,12 @@ const MovieDetails = () => {
             />
           </View>
 
-          {/* Update TabBar container spacing */}
-          <Animated.View style={{
-            marginTop: 8,
-            opacity: animatedStyles.tabBar.opacity,
-            transform: [{
-              translateY: animatedStyles.tabBar.translateY
-            }],
-          }}>
+          {/* Tab bar + tab content. This was wrapped in a scrollY-interpolated
+              Animated.View (dim 0.3 → 1.0 over the first 100px of scroll), but the
+              legacy Animated interpolation froze at its mount value on the new
+              architecture, leaving everything below the hero permanently dimmed.
+              The reveal effect was cut rather than rebuilt — full brightness always. */}
+          <View style={{ marginTop: 8 }}>
             {movie && (
               <MemoizedMovieTabBar
                 activeTab={activeTab}
@@ -843,7 +690,7 @@ const MovieDetails = () => {
                 scrollViewRef={mainScrollViewRef}
               />
             )}
-          </Animated.View>
+          </View>
         </View>
 
         {/* Trailer Player */}
@@ -872,7 +719,61 @@ const styles = StyleSheet.create({
   logoImage: {
     width: SCREEN_WIDTH * 0.7,
     height: 100,
-  }
+  },
+  synopsisOverlay: {
+    position: 'absolute',
+    top: 90,
+    left: 16,
+    right: 16,
+    maxHeight: '55%',
+    zIndex: 1000,
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 12,
+  },
+  synopsisBlur: {
+    // Tint over the blur; doubles as the fallback where blur is unavailable.
+    backgroundColor: 'rgba(15, 15, 20, 0.55)',
+    paddingHorizontal: 18,
+    paddingBottom: 18,
+  },
+  synopsisHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 14,
+    paddingBottom: 10,
+  },
+  synopsisTitle: {
+    color: '#9ccadf',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+  },
+  synopsisClose: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  synopsisScroll: {
+    flexGrow: 0,
+  },
+  synopsisText: {
+    color: 'rgba(255, 255, 255, 0.88)',
+    fontSize: 15,
+    lineHeight: 23,
+    letterSpacing: 0.2,
+  },
 });
 
 export default React.memo(MovieDetails);
