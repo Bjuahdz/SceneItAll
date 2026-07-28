@@ -16,6 +16,13 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+# Release signing keys. android/app/debug.keystore is deliberately committed and
+# excepted below — it is the public Android SDK debug key (CN=Android Debug,
+# password "android") and cannot sign a store release. Any OTHER keystore is a
+# real signing key and must never be committed.
+*.keystore
+!android/app/debug.keystore
+keystore.properties
 
 #LOCAL LOGS
 REVIVAL_LOG.md
