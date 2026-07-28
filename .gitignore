@@ -26,6 +26,7 @@ keystore.properties
 
 #LOCAL LOGS
 REVIVAL_LOG.md
+PROJECT-PLAN.md
 
 # Metro
 .metro-health-check*
