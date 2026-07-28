@@ -2,9 +2,11 @@
  * Base Movie interface
  * Represents the basic movie data structure returned from TMDB API
  * Used in:
- * - components/MovieCard.tsx (for displaying movie cards in grids)
- * - components/HeroPoster.tsx (for hero section movie display)
+ * - components/homepage/HeroPoster.tsx (for hero section movie display)
  * - services/api.ts (as base for API responses)
+ *
+ * (components/MovieCard.tsx also consumed this; it was deleted 2026-07-28 once
+ * the poster grids stopped importing it.)
  */
 export interface Movie {
   id: number;                    // Unique identifier for the movie
@@ -103,11 +105,13 @@ export interface MovieDetails {
   directors: {                  // Array of movie directors
     id: number;
     name: string;
+    profile_path: string | null; // Headshot path (for the people-forward UI)
   }[];
   writers: {                    // Array of movie writers with their roles
     id: number;
     name: string;
-    job: string;
+    job: string;                // One or more jobs, merged (e.g. "Screenplay, Story")
+    profile_path: string | null; // Headshot path (for the people-forward UI)
   }[];
   cast: {                       // Array of cast members
     id: number;
@@ -141,27 +145,6 @@ export interface MovieLanguage {
 export interface TrendingCardProps {
   movie: TrendingMovie;        // Trending movie data
   index: number;               // Position in trending list
-}
-
-/**
- * MovieActionButtonsProps interface
- * Props for the movie action buttons component
- * Used in:
- * - components/MovieActionButtons.tsx
- * - app/movie/[id].tsx (movie details page actions)
- */
-export interface MovieActionButtonsProps {
-  movieId: string;             // Movie identifier
-  onLike: () => void;         // Like action handler
-  onDislike: () => void;      // Dislike action handler
-  onFavorite: () => void;     // Favorite action handler
-  onWatch: () => void;        // Watch action handler
-  onTrailer: () => void;      // Trailer view handler
-  isLiked?: boolean;          // Current like state
-  isDisliked?: boolean;       // Current dislike state
-  isFavorite?: boolean;       // Current favorite state
-  hasTrailer?: boolean;       // Whether trailer is available
-  onStateChange?: (newState: { isLiked: boolean; isDisliked: boolean; isFavorite: boolean }) => void;
 }
 
 /**
@@ -204,10 +187,9 @@ export interface MovieTabBarProps {
   activeTab: TabType;         // Currently active tab
   setActiveTab: (tab: TabType) => void; // Tab change handler
   movie: MovieDetails;        // Movie details data
-  onTrailerSelect: (videoKey: string) => void; // Trailer selection handler
-  selectedVideo: string | null; // Currently selected video
-  onCloseVideo: () => void;   // Video close handler
+  onTrailerSelect: (videoKey: string) => void; // Trailer selection handler (the detail screen owns the one cinema player)
   scrollViewRef?: React.RefObject<ScrollView>; // Reference to scroll view
+  onSimilarMovieSelect?: (movieId: number) => void; // SIMILAR tab tap → push onto the in-sheet details stack
 }
 
 /**

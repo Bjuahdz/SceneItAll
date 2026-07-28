@@ -3,7 +3,7 @@
     "name": "SceneItAll",
     "slug": "SceneItAll",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icons/logov2.png",
     "scheme": "movies",
     "userInterfaceStyle": "automatic",
@@ -37,7 +37,9 @@
       "react-native-video",
       "expo-video",
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-sqlite",
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true

@@ -121,11 +121,24 @@ export const fetchMovieDetails = async (movieId: string): Promise<MovieDetails> 
       creditsResponse.json()
     ]);
 
-    // Get US certification
-    const usRelease = releaseDatesData.results?.find(
-      (r: any) => r.iso_3166_1 === 'US'
-    );
-    const certification = usRelease?.release_dates?.[0]?.certification || 'NR';
+    // US certification — TMDB lists SEVERAL release entries per country (premiere,
+    // limited, theatrical, digital, physical, TV) and many carry an EMPTY
+    // certification. Taking entry [0] made films whose first entry is a festival
+    // premiere read "NR" even though the theatrical entry right below holds the
+    // real rating (same first-item-wins bug the trailer fetch had). Scan every US
+    // entry with a non-empty certification, preferring the types most likely to
+    // carry the actual board rating.
+    const CERT_TYPE_PRIORITY = [3, 4, 2, 5, 6, 1]; // theatrical → digital → limited → physical → TV → premiere
+    const certPriority = (type: number) => {
+      const i = CERT_TYPE_PRIORITY.indexOf(type);
+      return i === -1 ? CERT_TYPE_PRIORITY.length : i;
+    };
+    const usCerts = (
+      releaseDatesData.results?.find((r: any) => r.iso_3166_1 === 'US')?.release_dates ?? []
+    )
+      .filter((d: any) => typeof d.certification === 'string' && d.certification.trim().length > 0)
+      .sort((a: any, b: any) => certPriority(a.type) - certPriority(b.type));
+    const certification = usCerts[0]?.certification.trim() || 'NR';
 
     // Format runtime
     const hours = Math.floor(movieData.runtime / 60);
@@ -157,21 +170,36 @@ export const fetchMovieDetails = async (movieId: string): Promise<MovieDetails> 
       return isNegative ? `-${result}` : result;
     };
 
-    // Get directors and writers from credits
-    const directors = creditsData.crew
+    // Get directors from credits, deduped by person (keep their headshot).
+    const directorMap = new Map<number, { id: number; name: string; profile_path: string | null }>();
+    creditsData.crew
       .filter((person: any) => person.job === 'Director')
-      .map((director: any) => ({
-        id: director.id,
-        name: director.name
-      }));
+      .forEach((d: any) => {
+        if (!directorMap.has(d.id)) {
+          directorMap.set(d.id, { id: d.id, name: d.name, profile_path: d.profile_path ?? null });
+        }
+      });
+    const directors = Array.from(directorMap.values());
 
-    const writers = creditsData.crew
+    // Get writers from credits, deduped by person with their jobs merged so that
+    // someone credited as both "Screenplay" and "Story" surfaces as a single face.
+    const writerMap = new Map<number, { id: number; name: string; profile_path: string | null; jobs: string[] }>();
+    creditsData.crew
       .filter((person: any) => ['Screenplay', 'Writer', 'Story'].includes(person.job))
-      .map((writer: any) => ({
-        id: writer.id,
-        name: writer.name,
-        job: writer.job
-      }));
+      .forEach((w: any) => {
+        const existing = writerMap.get(w.id);
+        if (existing) {
+          if (!existing.jobs.includes(w.job)) existing.jobs.push(w.job);
+        } else {
+          writerMap.set(w.id, { id: w.id, name: w.name, profile_path: w.profile_path ?? null, jobs: [w.job] });
+        }
+      });
+    const writers = Array.from(writerMap.values()).map((w) => ({
+      id: w.id,
+      name: w.name,
+      job: w.jobs.join(', '),
+      profile_path: w.profile_path,
+    }));
 
     // Get cast members
     const cast = creditsData.cast
@@ -328,8 +356,10 @@ export const fetchMovieLanguages = async (movieId: string): Promise<MovieLanguag
 // Add this new function to fetch trailers
 export const fetchMovieVideos = async (movieId: string): Promise<MovieVideo[]> => {
   try {
+    // include_video_language keeps language-less uploads too — some films' only
+    // trailers are tagged with no language and were silently dropped before.
     const response = await fetch(
-      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/videos`,
+      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/videos?include_video_language=en,null`,
       {
         method: 'GET',
         headers: TMDB_CONFIG.headers,
@@ -341,22 +371,164 @@ export const fetchMovieVideos = async (movieId: string): Promise<MovieVideo[]> =
     }
 
     const data = await response.json();
-    
-    // Filter for official trailers only
-    const videos = data.results
-      .filter((video: MovieVideo) => 
-        video.type === 'Trailer' && // Only trailers, no teasers
-        video.site === 'YouTube' &&
-        video.official // Only official trailers
-      )
-      .sort((a: MovieVideo, b: MovieVideo) => {
-        // Sort by published date (oldest first)
-        return new Date(a.published_at).getTime() - new Date(b.published_at).getTime();
-      });
 
-    return videos;
+    // Graceful widening instead of a hard "official Trailer" gate: prefer official
+    // trailers, fall back to ANY trailer, then to teasers. Movies whose only uploads
+    // are unofficial cuts or teasers used to show "No trailers available" even though
+    // TMDB clearly lists videos for them.
+    const youtube: MovieVideo[] = (data.results ?? []).filter(
+      (video: MovieVideo) => video.site === 'YouTube'
+    );
+    const officialTrailers = youtube.filter((v) => v.type === 'Trailer' && v.official);
+    const anyTrailers = youtube.filter((v) => v.type === 'Trailer');
+    const teasers = youtube.filter((v) => v.type === 'Teaser');
+    const picked =
+      officialTrailers.length > 0 ? officialTrailers : anyTrailers.length > 0 ? anyTrailers : teasers;
+
+    return [...picked].sort((a: MovieVideo, b: MovieVideo) => {
+      // Sort by published date (oldest first)
+      return new Date(a.published_at).getTime() - new Date(b.published_at).getTime();
+    });
   } catch (error) {
     console.error('Error fetching movie videos:', error);
+    return [];
+  }
+};
+
+// Accessibility / alternate cuts that shouldn't be THE trailer the player opens:
+// audio-described, voiceover/narrated, sign-language, and dubbed versions. TMDB
+// tags these as type "Trailer" + official, so name is the only signal. The Extras
+// tab still lists them — this only steers the one-tap player pick.
+const ALT_TRAILER = /audio\s?descri|described|voice\s?over|narrat|descriptive|sign\s?language|\basl\b|\bhoh\b|dubbed|\bdub\b|foreign/i;
+
+/**
+ * pickMainTrailer — from a movie's videos (as returned by fetchMovieVideos, sorted
+ * oldest-first), choose the single best MAIN trailer to play: drop the accessibility
+ * / alternate cuts, then prefer official trailers → any trailer → teaser, and among
+ * those take the newest (usually the theatrical / final trailer). Returns undefined
+ * only if there's nothing playable at all.
+ */
+export const pickMainTrailer = (videos: MovieVideo[]): MovieVideo | undefined => {
+  if (!videos || videos.length === 0) return undefined;
+  const main = videos.filter((v) => !ALT_TRAILER.test(v.name));
+  const pool = main.length > 0 ? main : videos; // all were alt cuts → don't strand the user
+  const officialTrailers = pool.filter((v) => v.type === 'Trailer' && v.official);
+  const anyTrailers = pool.filter((v) => v.type === 'Trailer');
+  const teasers = pool.filter((v) => v.type === 'Teaser');
+  const best =
+    officialTrailers.length > 0 ? officialTrailers : anyTrailers.length > 0 ? anyTrailers : teasers.length > 0 ? teasers : pool;
+  return best[best.length - 1]; // newest of the chosen tier
+};
+
+// Person quick facts for the filmmaker cards (birthday / deathday / birthplace).
+export type PersonDetails = {
+  id: number;
+  birthday: string | null;
+  deathday: string | null;
+  place_of_birth: string | null;
+};
+
+export const fetchPersonDetails = async (personId: number): Promise<PersonDetails | null> => {
+  try {
+    const response = await fetch(`${TMDB_CONFIG.BASE_URL}/person/${personId}`, {
+      method: 'GET',
+      headers: TMDB_CONFIG.headers,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+      id: data.id,
+      birthday: data.birthday ?? null,
+      deathday: data.deathday ?? null,
+      place_of_birth: data.place_of_birth ?? null,
+    };
+  } catch (error) {
+    console.error(`Error fetching person ${personId}:`, error);
+    return null;
+  }
+};
+
+// Watch providers (JustWatch data via TMDB) — what's streamable / rentable /
+// buyable, per region. TMDB exposes availability only, no deep links, and the
+// data source must be attributed to JustWatch wherever it's shown.
+// https://developer.themoviedb.org/reference/movie-watch-providers
+export type WatchProvider = {
+  provider_id: number;
+  provider_name: string;
+  logo_path: string | null;
+};
+
+export type MovieWatchProviders = {
+  region: string;
+  link: string | null;
+  flatrate: WatchProvider[];
+  rent: WatchProvider[];
+  buy: WatchProvider[];
+};
+
+export const fetchWatchProviders = async (
+  movieId: string,
+  region: string = 'US'
+): Promise<MovieWatchProviders | null> => {
+  try {
+    const response = await fetch(
+      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/watch/providers`,
+      {
+        method: 'GET',
+        headers: TMDB_CONFIG.headers,
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    // Strictly the requested region (US by default) — no cross-region fallback.
+    const entry = (data.results || {})[region];
+    if (!entry) return null;
+
+    return {
+      region,
+      link: entry.link ?? null,
+      flatrate: entry.flatrate ?? [],
+      rent: entry.rent ?? [],
+      buy: entry.buy ?? [],
+    };
+  } catch (error) {
+    console.error('Error fetching watch providers:', error);
+    return null;
+  }
+};
+
+// Similar movies for the detail page's SIMILAR tab. TMDB matches on genres +
+// plot keywords (results can be loose — documented behavior), so we just keep
+// the ones with a poster and cap the list.
+// https://developer.themoviedb.org/reference/movie-similar
+export const fetchSimilarMovies = async (movieId: string, limit: number = 8) => {
+  try {
+    const response = await fetch(
+      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/recommendations?language=en-US&page=1`,
+      {
+        method: 'GET',
+        headers: TMDB_CONFIG.headers,
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return (data.results || [])
+      .filter((movie: any) => movie.poster_path)
+      .slice(0, limit);
+  } catch (error) {
+    console.error('Error fetching similar movies:', error);
     return [];
   }
 };
