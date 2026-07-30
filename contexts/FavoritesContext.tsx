@@ -11,6 +11,7 @@ import {
   getFavorites,
   addFavorite,
   removeFavorite,
+  deleteAllFavorites,
   type FavoriteMovie,
 } from "@/services/db";
 
@@ -19,6 +20,8 @@ interface FavoritesContextValue {
   ready: boolean; // false until the first DB load resolves
   isFavorite: (id: number) => boolean;
   toggleFavorite: (movie: FavoriteMovie) => void;
+  /** Dev-panel blank slate. Resolves with how many were removed. */
+  clearFavorites: () => Promise<number>;
 }
 
 const FavoritesContext = createContext<FavoritesContextValue | null>(null);
@@ -58,9 +61,17 @@ export const FavoritesProvider = ({ children }: { children: React.ReactNode }) =
     });
   }, []);
 
+  // Goes through the context rather than straight to the DB so every saved-state star
+  // and slate row in the tree repaints as empty instead of holding a stale save.
+  const clearFavorites = useCallback(async () => {
+    const removed = await deleteAllFavorites();
+    setFavorites([]);
+    return removed;
+  }, []);
+
   const value = useMemo(
-    () => ({ favorites, ready, isFavorite, toggleFavorite }),
-    [favorites, ready, isFavorite, toggleFavorite]
+    () => ({ favorites, ready, isFavorite, toggleFavorite, clearFavorites }),
+    [favorites, ready, isFavorite, toggleFavorite, clearFavorites]
   );
 
   return <FavoritesContext.Provider value={value}>{children}</FavoritesContext.Provider>;
