@@ -3,6 +3,7 @@ import { StyleSheet } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import Animated, {
   Easing,
+  cancelAnimation,
   interpolate,
   useAnimatedStyle,
   useSharedValue,
@@ -11,11 +12,15 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-// A prismatic light-band sweep — the "something waits here" cue that replaced
-// accent color on the record verb. Not a flat white flash: the band is feathered
-// and carries faint spectral edges (rose → white → ice), moving slowly, like
-// light walking across brushed glass. Parent must be overflow:hidden; this is an
-// absolute overlay and never takes touches.
+// A prismatic light-band sweep — the "something waits here" cue. Not a flat white
+// flash: the band is feathered and carries faint spectral edges (rose → white → ice),
+// moving slowly, like light walking across brushed glass. An absolute overlay that
+// never takes touches.
+//
+// THE HOST OWNS THE CLIP, and it no longer has to be overflow:hidden. Its one caller is
+// CaptureWell's first-run sheen, which clips with a MaskedView instead — this stack will
+// not reliably contain a transformed child inside overflow:hidden, but a mask clips by
+// alpha and does. Rendered BEFORE the recesses there, so the light passes behind the hole.
 export default function ShimmerSweep({
   travel = 420,
   band = 130,
@@ -37,6 +42,9 @@ export default function ShimmerSweep({
       -1,
       false
     );
+    // An infinite repeat outlives the component otherwise — this one is unmounted the
+    // moment its host stops needing it.
+    return () => cancelAnimation(p);
   }, [p, period]);
 
   const style = useAnimatedStyle(() => ({
