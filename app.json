@@ -8,7 +8,10 @@
     "scheme": "movies",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "SceneItAll records your spoken take on a film so it can be transcribed into your journal."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -34,12 +37,18 @@
           "backgroundColor": "#0d100e"
         }
       ],
-      "react-native-video",
-      "expo-video",
       "expo-font",
       "expo-web-browser",
       "expo-sqlite",
-      "expo-audio"
+      "expo-audio",
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "SceneItAll saves posters and backdrops to your photo library.",
+          "photosPermission": "SceneItAll saves posters and backdrops to your photo library.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
