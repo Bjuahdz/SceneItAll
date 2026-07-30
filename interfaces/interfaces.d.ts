@@ -124,9 +124,13 @@ export interface MovieDetails {
 /**
  * MovieLanguage interface
  * Represents language information for a movie
- * Used in:
- * - services/api.ts (fetchMovieLanguages)
- * - components/MovieTabBar.tsx (language selection)
+ *
+ * UNUSED as of 2026-07-28. Its only producer, services/api.ts's
+ * `fetchMovieLanguages`, was deleted then — it had no callers and re-fetched
+ * /movie/{id}, duplicating a request `fetchMovieDetails` already makes. The
+ * language-selection UI it was written for never shipped. Kept only because the
+ * shape is the documented TMDB one and is worth having if that feature returns;
+ * delete it outright if it's still unused next time you're in here.
  */
 export interface MovieLanguage {
   iso_639_1: string;           // ISO language code
@@ -188,8 +192,11 @@ export interface MovieTabBarProps {
   setActiveTab: (tab: TabType) => void; // Tab change handler
   movie: MovieDetails;        // Movie details data
   onTrailerSelect: (videoKey: string) => void; // Trailer selection handler (the detail screen owns the one cinema player)
-  scrollViewRef?: React.RefObject<ScrollView>; // Reference to scroll view
   onSimilarMovieSelect?: (movieId: number) => void; // SIMILAR tab tap → push onto the in-sheet details stack
+  // EXTRAS gallery tap → the detail screen opens the floating artwork viewer. It is
+  // owned up there, not here: MovieTabBar renders inside the detail ScrollView, and a
+  // full-screen overlay mounted at that depth gets clipped by the scroll container.
+  onExpandArtwork: (item: import('../components/moviedetails/ArtworkViewer').ArtworkSource) => void;
 }
 
 /**

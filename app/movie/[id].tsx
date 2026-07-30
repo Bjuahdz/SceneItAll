@@ -1,13 +1,14 @@
-import { View, Dimensions, ActivityIndicator, Text, ScrollView, Pressable, TouchableOpacity, StyleSheet, StatusBar, NativeSyntheticEvent, NativeScrollEvent } from 'react-native'
+import { View, Dimensions, ActivityIndicator, Text, ScrollView, Pressable, StyleSheet, StatusBar, NativeSyntheticEvent, NativeScrollEvent } from 'react-native'
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import ReAnimated, { useSharedValue, useDerivedValue, useAnimatedStyle, useAnimatedReaction, runOnJS, interpolate, Extrapolation, withSpring, withTiming, withSequence, Easing, FadeInDown, FadeOut, type EntryAnimationsValues, type ExitAnimationsValues } from 'react-native-reanimated';
-import React, { useState, useRef, useEffect } from 'react'
+import ReAnimated, { useSharedValue, useDerivedValue, useAnimatedStyle, interpolate, Extrapolation, withSpring, withTiming, withSequence, Easing, FadeInDown, FadeOut, type EntryAnimationsValues, type ExitAnimationsValues } from 'react-native-reanimated';
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import useFetch from '@/services/useFetch';
 import { fetchMovieDetails, fetchMovieImages, fetchMovieVideos, pickMainTrailer } from '@/services/api';
 import { LinearGradient } from 'expo-linear-gradient';
 import MovieTabBar from '@/components/moviedetails/MovieTabBar';
+import ArtworkViewer, { type ArtworkSource } from '@/components/moviedetails/ArtworkViewer';
 import TrailerPlayer from '../../components/TrailerPlayer';
 import { MovieVideo, TabType } from '@/interfaces/interfaces';
 import { Image } from 'expo-image'; // Changed to expo-image for better performance
@@ -15,19 +16,20 @@ import * as Haptics from 'expo-haptics';
 import { useFavorites } from '@/contexts/FavoritesContext';
 import { useCaptureSession } from '@/hooks/useCaptureSession';
 import { ConfettiRain, DING, RAIN_LIFETIME_MS, THUD } from '@/components/moviedetails/CapturePill';
-import StubCapturePanel from '@/components/moviedetails/StubCapturePanel';
+import CaptureWell, { isCaptureLive } from '@/components/moviedetails/CaptureWell';
+import FloatingVerbs from '@/components/moviedetails/FloatingVerbs';
 import { useAudioPlayer } from 'expo-audio';
 import CaptureCountdownOverlay from '@/components/moviedetails/CaptureCountdownOverlay';
 import CaptureStatusBadge from '@/components/moviedetails/CaptureStatusBadge';
 import EntriesStar from '@/components/moviedetails/EntriesStar';
-import ShimmerSweep from '@/components/moviedetails/ShimmerSweep';
 import MovieEntriesTab from '@/components/moviedetails/MovieEntriesTab';
 import { getTakes, type Take } from '@/services/db';
 import { onEnrichmentChanged } from '@/services/enrichment';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, { Path, Line } from 'react-native-svg';
+
 import { TICKET_GLASS_TINT, TICKET_ACCENT, ink, accent } from '@/components/moviedetails/ticketTheme';
+import { NAV_BOTTOM, NAV_SIDE_INSET } from '@/constants/navMetrics';
 
 // Add new memoized components to prevent unnecessary re-renders
 const MemoizedMovieTabBar = React.memo(MovieTabBar);
@@ -47,8 +49,8 @@ const TOP_BAR_TOP = 15;
 // "sheet" that scrolls up over it while the backdrop drifts slower (parallax) and takes
 // on a progressive blur + dim (the glassy focus shift).
 const HERO_RATIO = 0.70;      // hero height as a fraction of the screen. Lower = shorter hero.
-const LOGO_BOTTOM = 120;      // logo distance from the hero bottom.
-const CONTENT_LIFT = 120;     // px the sheet's rounded top overlaps INTO the backdrop at rest.
+const LOGO_BOTTOM = 90;      // logo distance from the hero bottom.
+const CONTENT_LIFT = 65;     // px the sheet's rounded top overlaps INTO the backdrop at rest.
 // Backdrop blur fade — set to 0 to keep the hero sharp (no progressive glass). Independent
 // of the ticket expand morph below.
 const BLUR_END = 0;
@@ -56,14 +58,9 @@ const BLUR_END = 0;
 // Keep this > 0 even when BLUR_END is 0 so the card still grows on the way up.
 const MORPH_END = 0.5;
 
-// ── TMDB rating mark (centered in the stub's action row) ────────────────────
-// The brand wordmark SVG ends in a gradient capsule ("the bubble") spanning the
-// right ~36% of the artwork (viewBox 273.42×35.52, capsule from x≈174) — the
-// score prints INSIDE it. No star, no "/10": the capsule IS the score's home.
-const TMDB_LOGO_H = 16;
-const TMDB_LOGO_W = Math.round(TMDB_LOGO_H * (273.42 / 35.52));
-const TMDB_BUBBLE_LEFT = '63.7%'; // 174.18 / 273.42
-const TMDB_NAVY = '#032541'; // TMDB brand navy — reads cleanly on the capsule gradient
+// The floating floor's run — same margins as the tab bar's, because the two occupy the
+// same footprint. FloatingVerbs and CaptureWell divide exactly this between them.
+const FLOOR_RUN_W = Dimensions.get('window').width - NAV_SIDE_INSET * 2;
 
 // ── Glass ticket (reference silhouette) ──────────────────────────────────────
 // One BlurView + slight dark tint, masked to a rounded ticket with true side
@@ -161,20 +158,56 @@ interface MovieDetailsViewProps {
   // Arrived via a hero-section TRAILER button: once the ticket lands, run the
   // standard trailer flow automatically (sheet appears → lights dim → trailer).
   autoTrailer?: boolean;
+  // Which tab this layer opens on. Only ever SEEDS the local state — the view keeps
+  // owning its tab from then on, and reports moves back up via onTabChange. See the
+  // stack owner at the foot of this file for why the memory cannot live in here.
+  initialTab?: TabType;
+  onTabChange?: (tab: TabType) => void;
 }
 
-const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, autoTrailer }: MovieDetailsViewProps) => {
-  const insets = useSafeAreaInsets();
-  const [images, setImages] = useState<{
-    backdrop: string | null,
-    logo: string | null
-  }>({
-    backdrop: null,
-    logo: null
-  });
+/**
+ * Hero artwork for one movie, STAMPED with the id it was fetched for.
+ *
+ * The stamp is what keeps the hero race-free. `artwork.movieId === movieId` doubles
+ * as the "we have an answer for THIS movie" signal, so a slow response belonging to
+ * a previous movie can never be mistaken for the current one's, and there is no
+ * separate settled flag that could drift out of sync with the data.
+ *
+ * On failure we still store a stamped, all-null record — that flips "settled" so the
+ * fallback ladder engages, instead of leaving the hero blank forever.
+ */
+type HeroArtwork = {
+  movieId: string;
+  poster: string | null;   // best-ranked textless poster — the full-bleed hero
+  backdrop: string | null; // best textless backdrop — used only if there's no poster
+  logo: string | null;     // title logo laid over the hero
+};
+
+const MovieDetailsView = ({
+  movieId,
+  nested,
+  dispense,
+  onOpenMovie,
+  onBack,
+  autoTrailer,
+  initialTab,
+  onTabChange,
+}: MovieDetailsViewProps) => {
+  const [artwork, setArtwork] = useState<HeroArtwork | null>(null);
+  // /images has answered for THIS movie — successfully or not. Nothing paints before it.
+  const artworkSettled = artwork?.movieId === movieId;
   const { data: movie, loading } = useFetch(() => fetchMovieDetails(movieId));
   const { height } = Dimensions.get('window');
-  const [activeTab, setActiveTab] = useState<TabType>('details');
+  // Seeded from the stack, then owned here. Every tab move is reported upward so the layer
+  // is still on this tab if the user pushes a similar movie and comes back.
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'details');
+  const selectTab = useCallback(
+    (tab: TabType) => {
+      setActiveTab(tab);
+      onTabChange?.(tab);
+    },
+    [onTabChange]
+  );
   const [view, setView] = useState<'info' | 'entries'>('info');
   const [synopsisExpanded, setSynopsisExpanded] = useState(false);
   // Full (uncapped) line count of the overview, measured once by an invisible twin —
@@ -187,7 +220,9 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
   const [trailers, setTrailers] = useState<MovieVideo[]>([]);
   const [trailersLoading, setTrailersLoading] = useState(true);
   const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
-  const [posterFetched, setPosterFetched] = useState(false);
+  // Extras artwork the user tapped, if any. Owned here rather than in MovieTabBar
+  // because the viewer is a full-screen layer and has to mount OUTSIDE the ScrollView.
+  const [expandedArtwork, setExpandedArtwork] = useState<ArtworkSource | null>(null);
   const imageTransitionDuration = 0;
 
   // Scroll-driven animations (Reanimated). `scrollY` is a SharedValue fed by the plain
@@ -212,13 +247,28 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
       : withSpring(0, { damping: 26, stiffness: 200, mass: 1 }); // ticket returns, settles clean
   }, [cinema, cinemaSV]);
 
+  // Artwork viewer open → the page's chrome steps aside, same as cinema mode. Declared
+  // ABOVE chromeFadeStyle on purpose: a worklet captures its closure when the hook runs,
+  // so a shared value declared below would be captured as undefined (see check-worklets).
+  const artworkSV = useSharedValue(0);
+  useEffect(() => {
+    artworkSV.value = withTiming(expandedArtwork ? 1 : 0, {
+      // Matches the viewer's own open/close timings so the chrome leaves and returns
+      // in step with the card rather than trailing it.
+      duration: expandedArtwork ? 320 : 240,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [expandedArtwork, artworkSV]);
+
   // The scroll stage sinks one full screen-height — off-stage from ANY scroll position.
   const stageStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: cinemaSV.value * height }],
   }));
-  // Chrome (top bar, header scrim, capture pill/badge) fades out as the stage sinks.
+  // Chrome (top bar, header scrim, capture pill/badge) fades out as the stage sinks —
+  // and equally when the artwork viewer takes over the screen. Multiplied, so whichever
+  // is active hides it and BOTH have to be clear before it comes back.
   const chromeFadeStyle = useAnimatedStyle(() => ({
-    opacity: 1 - cinemaSV.value,
+    opacity: (1 - cinemaSV.value) * (1 - artworkSV.value),
   }));
   // Lights out: the cinema scrim (blur + dim over the backdrop, under the logo)
   // rises with the stage's exit so the logo + trailer become the lit subjects.
@@ -226,49 +276,39 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     opacity: cinemaSV.value,
   }));
 
-  // Top bar "comes alive": shrinks a touch on scroll-down, springs back to full size on
-  // scroll-up. Direction is derived from the plain-JS onScroll (useAnimatedScrollHandler
-  // doesn't fire reliably on this stack) and written once per direction-change.
-  const barShrink = useSharedValue(0); // 0 = full, 1 = minimized
-
+  // The top bar used to shrink on scroll-down and spring back on scroll-up. It is fixed at
+  // full size now: with the title up there permanently, a bar that changes size is a bar
+  // whose longest titles change size too — and a name you are mid-way through reading
+  // should not move. What the header still does on scroll is FADE IN, which is the part
+  // that carries information (the hero's own logo is going away).
+  //
+  // The scroll DIRECTION is still tracked, because the entries list uses it to close an
+  // inline rename when you scroll away from it. Nothing visual reads this any more — if the
+  // rename ever moves to its own dismissal, this and its two refs go with it.
+  const scrollFold = useSharedValue(0); // 0 = at rest / scrolling up · 1 = scrolling down
   const lastYRef = useRef(0);
-  const collapsedRef = useRef(false);
+  const foldedRef = useRef(false);
   // Bounce only at the top (pull-to-zoom). Once the user has scrolled down, lock the
   // bottom — no rubber-band overscroll when they hit the end of the ticket.
   const [bounces, setBounces] = useState(true);
   const bouncesRef = useRef(true);
-  // Capture "detach" (Paper 04–05 — "the panel's ACTION ROW detaches and docks"):
-  // a continuous, scroll-DRIVEN hand-off, not a state flip. dockProgress rides
-  // scrollY over a fixed band; the inline panel's verb row fades/sinks by it
-  // while the dock rises/appears by it — a parallax glide the finger can play
-  // forwards and backwards. `captureDetached` only gates which copy is TOUCHABLE.
-  const [captureDetached, setCaptureDetached] = useState(false);
-  const captureDetachedRef = useRef(false);
+  // The capture module used to be SEATED in the ticket and hand its verb row off to a
+  // bottom dock as it scrolled away — a scroll-driven parallax between two copies of the
+  // same row, with a flag deciding which copy was touchable (Paper 04–05). That whole
+  // mechanism existed only because the module could leave the viewport. It floats now,
+  // so there is nothing to hand off: dockProgress, captureDetached, detachProgress and
+  // rowsInert are all gone rather than reimplemented.
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = e.nativeEvent.contentOffset.y;
     scrollY.value = y;
     const dy = y - lastYRef.current;
     lastYRef.current = y;
-    let next = collapsedRef.current;
-    if (y <= 6) next = false; // always full near the top
-    else if (Math.abs(dy) > 4) next = dy > 0; // down → minimize, up → restore
-    if (next !== collapsedRef.current) {
-      collapsedRef.current = next;
-      barShrink.value = withSpring(next ? 1 : 0, {
-        damping: 14,
-        stiffness: 190,
-        mass: 0.65,
-      });
-    }
-    // Touch ownership flips at the middle of the visual glide (with a small
-    // hysteresis band so it can't chatter) — the visuals themselves are driven
-    // continuously by dockProgress, never by this flag.
-    let detached = captureDetachedRef.current;
-    if (y > 210) detached = true;
-    else if (y < 180) detached = false;
-    if (detached !== captureDetachedRef.current) {
-      captureDetachedRef.current = detached;
-      setCaptureDetached(detached);
+    let folded = foldedRef.current;
+    if (y <= 6) folded = false;
+    else if (Math.abs(dy) > 4) folded = dy > 0;
+    if (folded !== foldedRef.current) {
+      foldedRef.current = folded;
+      scrollFold.value = folded ? 1 : 0; // a flag, not an animation — nothing renders off it
     }
     const allowBounce = y <= 1;
     if (allowBounce !== bouncesRef.current) {
@@ -278,16 +318,6 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
   };
 
   const heroH = height * HERO_RATIO;
-
-  // 0 → verbs seated in the ticket panel · 1 → verbs docked at the bottom.
-  // One value drives BOTH sides of the parallax so they can never disagree.
-  const dockProgress = useDerivedValue(() =>
-    interpolate(scrollY.value, [120, 260], [0, 1], Extrapolation.CLAMP)
-  );
-  const dockStyle = useAnimatedStyle(() => ({
-    opacity: dockProgress.value,
-    transform: [{ translateY: (1 - dockProgress.value) * 44 }],
-  }));
 
   // FIXED backdrop: STATIC by design — no scroll drift. Moving it exposed the layer
   // beneath as a gray band, and the sheet's expand morph is the one parallax gesture
@@ -331,21 +361,13 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     interpolate(scrollY.value, [heroH * 0.25, heroH * 0.5], [0, 1], Extrapolation.CLAMP)
   );
 
-  const headerScrimStyle = useAnimatedStyle(() => {
-    const scrollOpacity = headerProgress.value;
-
-    return {
-      opacity:
-        scrollOpacity *
-        interpolate(barShrink.value, [0, 1], [1, 0.88], Extrapolation.CLAMP) *
-        (1 - cinemaSV.value),
-      height: interpolate(barShrink.value, [0, 1], [TOP_BAR_TOP + 55, TOP_BAR_TOP + 48], Extrapolation.CLAMP),
-      transform: [
-        { translateY: interpolate(barShrink.value, [0, 1], [0, -4], Extrapolation.CLAMP) },
-        { scaleY: interpolate(barShrink.value, [0, 1], [1, 0.94], Extrapolation.CLAMP) },
-      ],
-    };
-  });
+  // Opacity only. The scrim used to also shrink, lift and scale with the bar; with the bar
+  // fixed there is nothing for it to follow, and a header whose height moves is a header
+  // whose soft bottom edge moves — which is the one thing that would make the edge visible
+  // again.
+  const headerScrimStyle = useAnimatedStyle(() => ({
+    opacity: headerProgress.value * (1 - cinemaSV.value),
+  }));
 
   // The film's name, on the same band as the glass behind it. It lifts the last few
   // points as it arrives rather than only fading, so it reads as settling onto the
@@ -354,16 +376,6 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
   const headerTitleStyle = useAnimatedStyle(() => ({
     opacity: headerProgress.value * (1 - cinemaSV.value),
     transform: [{ translateY: (1 - headerProgress.value) * 6 }],
-  }));
-
-  // The top bar's scroll-reactive size: ~12% smaller + a hair up + slightly dimmer when
-  // minimized, full and crisp when restored. Subtle — just enough to feel alive.
-  const topBarAnimStyle = useAnimatedStyle(() => ({
-    transform: [
-      { scale: interpolate(barShrink.value, [0, 1], [1, 0.88], Extrapolation.CLAMP) },
-      { translateY: interpolate(barShrink.value, [0, 1], [0, -3], Extrapolation.CLAMP) },
-    ],
-    opacity: interpolate(barShrink.value, [0, 1], [1, 0.9], Extrapolation.CLAMP),
   }));
 
 
@@ -391,40 +403,50 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     ],
   }));
 
-  // Fetch images in parallel with movie details
+  // Hero artwork. This is the ONLY writer of `artwork` — deliberately.
+  //
+  // There used to be a second effect that set movie.backdrop_path the moment details
+  // arrived, "as a fallback". Because /images returns a far bigger payload than
+  // /movie/{id} (a popular film ships 100+ backdrops plus every poster and logo), it
+  // normally LOST that race: TMDB's landscape backdrop painted first and then visibly
+  // swapped to the poster once /images landed. Coming from Discover the swap was
+  // invisible — the hero had already warmed the 30-minute cache — which is why it only
+  // showed up on movies reached by search.
+  //
+  // The fallback now lives in the backdropUri memo, gated behind `artworkSettled`, so
+  // there is exactly one decision and nothing paints before it's made.
   React.useEffect(() => {
-    if (movieId) {
-      // Start fetching images immediately
-      const fetchImageData = async () => {
-        try {
-          const movieImages = await fetchMovieImages(movieId);
+    if (!movieId) return;
+    // Guards against applying a response after this layer has been dismissed.
+    let cancelled = false;
 
-          // Only set images if they're not already set
-          if (!posterFetched) {
-            setImages({
-              backdrop: movieImages.altPoster,
-              logo: movieImages.logo
-            });
-            setPosterFetched(true);
-          }
-        } catch (error) {
-          console.error('Error fetching images:', error);
-        }
-      };
+    (async () => {
+      // Stamped up front so the error path still marks this movie as settled.
+      let next: HeroArtwork = { movieId, poster: null, backdrop: null, logo: null };
+      try {
+        const images = await fetchMovieImages(movieId);
+        next = {
+          movieId,
+          // Prefer a DIFFERENT poster from the one the Discover hero / Trending rail
+          // shows, so the detail page has its own face — but only when that runner-up
+          // has been independently vetted. `variantPoster` is null whenever it hasn't
+          // (see MIN_VETTED_VOTES), and then we reuse the cover rather than reach for
+          // a worse image. That null is the entire fix for the old `altPoster` bug.
+          poster: images.variantPoster ?? images.poster,
+          backdrop: images.backdrops[0] ?? null,
+          logo: images.logo,
+        };
+      } catch (error) {
+        console.error(`Error fetching images for movie ${movieId}:`, error);
+        // `next` stays all-null but stamped — settled flips, the ladder falls through.
+      }
+      if (!cancelled) setArtwork(next);
+    })();
 
-      fetchImageData();
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [movieId]);
-
-  // Use movie backdrop as fallback
-  React.useEffect(() => {
-    if (movie && !images.backdrop && movie.backdrop_path) {
-      setImages(prev => ({
-        ...prev,
-        backdrop: movie.backdrop_path
-      }));
-    }
-  }, [movie, images.backdrop]);
 
   // Favorites come from the shared SQLite-backed context. `favorited` reflects the
   // persisted list; saving stores just enough to render the Saved tab's poster card.
@@ -477,8 +499,8 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     }
     showToast(
       adding ? 'favorite' : 'removed',
-      adding ? 'Added to Favorites' : 'Removed from Favorites',
-      adding ? 'Saved to your movie shelf' : 'Removed from your saved list'
+      adding ? 'Slated' : 'Removed',
+      adding ? 'Added to your slate' : 'Off your slate'
     );
     toggleFavorite({
       id: movie.id,
@@ -570,8 +592,8 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     if (next === 'entries') setNewCount(0); // opening entries clears the "new" dot
   }, []);
 
-  // Record entry point — lives in the ticket stub now (ported from the Paper flow's
-  // action block), same arming path the pill's idle tap used to take.
+  // Record entry point — the CaptureWell disc on the floating floor. Same arming path
+  // the old pill's idle tap took; only the thing you press has moved.
   const handleRecordPress = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     capture.start();
@@ -580,6 +602,10 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
   // Tapped play before the trailer list landed → remember it and start the show the
   // moment the fetch resolves (the button + toast show the loading state meanwhile).
   const pendingTrailer = useRef(false);
+  // Is a tap still waiting on something? Holds the trailer glyph FILLED until it clears.
+  // Set only when there is a REAL wait — when the video list is already in hand the player
+  // opens on the same tick and FloatingVerbs' own ping is what acknowledges the press.
+  const [trailerBusy, setTrailerBusy] = useState(false);
 
   const handleTrailerPress = () => {
     if (trailerUnavailableTimer.current) {
@@ -588,6 +614,7 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (trailers.length === 0) {
+      setTrailerBusy(true);
       if (trailersLoading) {
         pendingTrailer.current = true;
       } else {
@@ -595,6 +622,7 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           showToast('warning', 'No trailer found', 'Nothing playable for this title yet');
           trailerUnavailableTimer.current = null;
+          setTrailerBusy(false);
         }, 650);
       }
       return;
@@ -606,6 +634,7 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
   useEffect(() => {
     if (trailersLoading || !pendingTrailer.current) return;
     pendingTrailer.current = false;
+    setTrailerBusy(false);
     const main = pickMainTrailer(trailers);
     if (main) {
       setSelectedVideo(main.key);
@@ -632,17 +661,30 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
     return () => clearTimeout(t);
   }, [autoTrailer]);
 
-  // Optimize image loading
+  // The hero image, resolved in ONE place.
+  //
+  // Nothing paints until /images has answered (`artworkSettled`). That single gate is
+  // what removes the double-load: the old code rendered whichever source resolved
+  // first and then swapped. A brief empty hero is correct here — a wrong hero that
+  // visibly replaces itself is not.
+  //
+  // Fallback ladder, best first:
+  //   1. top-ranked TEXTLESS poster — the approved full-bleed hero
+  //   2. top TEXTLESS backdrop      — still language-filtered, just landscape
+  //   3. movie.backdrop_path        — TMDB's PRIMARY backdrop, which is NOT
+  //                                   language-filtered and can carry a title.
+  //                                   Genuinely last resort.
   const imageUri = React.useMemo(() => {
-    if (!images.backdrop && !movie?.backdrop_path) return null;
-    return `https://image.tmdb.org/t/p/w1280${images.backdrop || movie?.backdrop_path}`;
-  }, [images.backdrop, movie?.backdrop_path]);
+    if (!artworkSettled) return null;
+    const path = artwork?.poster ?? artwork?.backdrop ?? movie?.backdrop_path ?? null;
+    return path ? `https://image.tmdb.org/t/p/w1280${path}` : null;
+  }, [artworkSettled, artwork, movie?.backdrop_path]);
 
   // Generate logo URI
   const logoUri = React.useMemo(() => {
-    if (!images.logo) return null;
-    return `https://image.tmdb.org/t/p/w500${images.logo}`;
-  }, [images.logo]);
+    if (!artwork?.logo) return null;
+    return `https://image.tmdb.org/t/p/w500${artwork.logo}`;
+  }, [artwork?.logo]);
 
   useEffect(() => {
     const loadTrailers = async () => {
@@ -659,9 +701,6 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
 
     loadTrailers();
   }, [movieId]);
-
-  // Add back the mainScrollViewRef
-  const mainScrollViewRef = useRef<ScrollView>(null);
 
   if (loading && !imageUri) {
     return (
@@ -789,7 +828,6 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
           scroll position, then brings it back exactly where it was. */}
       <ReAnimated.View style={[styles.stage, stageStyle]}>
       <ScrollView
-        ref={mainScrollViewRef}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         bounces={bounces}
@@ -908,109 +946,11 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
               </Pressable>
             ) : null}
 
-            {/* ACTION BLOCK — Trailer · TMDB score · Watchlist, seated below the
-                synopsis so the verbs read as ONE cohesive block with the record
-                module beneath them. Touchables stay BARE wrappers with all visuals
-                on inner Views (Fabric landmine — see PROJECT-PLAN). */}
-            {movie && (
-              <View style={styles.stubActionRow}>
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={handleTrailerPress}
-                  style={styles.stubActionTouch}
-                  accessibilityRole="button"
-                  accessibilityLabel="Watch trailer"
-                  accessibilityState={{ busy: trailersLoading }}
-                >
-                  <View
-                    style={[
-                      styles.stubGlassBtn,
-                      trailers.length === 0 && !trailersLoading && styles.stubGlassBtnDisabled,
-                    ]}
-                  >
-                    <Ionicons name="play" size={14} color={ink(0.95)} />
-                    <Text style={styles.stubGlassLabel} numberOfLines={1}>Trailer</Text>
-                  </View>
-                </TouchableOpacity>
-
-                <View style={styles.tmdbLogoWrap}>
-                  <Image
-                    source={require('../../assets/images/TMDB LOGO.svg')}
-                    style={styles.tmdbLogo}
-                    contentFit="contain"
-                  />
-                  {movie.vote_average !== undefined && (
-                    <View style={styles.tmdbScoreBubble} pointerEvents="none">
-                      <Text style={styles.tmdbScore}>{movie.vote_average.toFixed(1)}</Text>
-                    </View>
-                  )}
-                </View>
-
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={handleToggleFavorite}
-                  style={styles.stubActionTouch}
-                  accessibilityRole="button"
-                  accessibilityLabel={favorited ? 'Remove from watchlist' : 'Add to watchlist'}
-                >
-                  <View style={styles.stubGlassBtn}>
-                    <Ionicons
-                      name={favorited ? 'bookmark' : 'bookmark-outline'}
-                      size={13}
-                      color={favorited ? TICKET_ACCENT : ink(0.95)}
-                    />
-                    <Text
-                      style={[styles.stubGlassLabel, favorited && { color: TICKET_ACCENT }]}
-                      numberOfLines={1}
-                    >
-                      {favorited ? 'Saved' : 'Watchlist'}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {/* RECORD MODULE — the stub's closer, below the synopsis (its seat down
-                here means it exits the viewport right where the bottom dock appears,
-                so the detach reads as the module re-docking, not swapping). Idle =
-                the RECORD A TAKE verb; live = the capture panel (Paper 02–07). */}
-            {movie && (
-              <View style={styles.stubRecordTouch}>
-                {capture.status === 'idle' ? (
-                  <TouchableOpacity
-                    activeOpacity={0.85}
-                    onPress={handleRecordPress}
-                    accessibilityRole="button"
-                    accessibilityLabel="Record a take"
-                  >
-                    <View style={styles.stubRecordBtn}>
-                      <Ionicons name="mic" size={15} color={ink(0.95)} />
-                      <Text style={styles.stubRecordLabel}>RECORD A TAKE</Text>
-                      {/* The invitation is a passing light, not a color. */}
-                      <ShimmerSweep />
-                    </View>
-                  </TouchableOpacity>
-                ) : (
-                  /* The panel stays seated — strip and waveform simply scroll
-                     with the page. Only its VERB ROW parallaxes away (driven by
-                     dockProgress) as the dock materializes below. */
-                  <StubCapturePanel
-                    status={capture.status}
-                    remainingMs={capture.remainingMs}
-                    durationMs={capture.durationMs}
-                    level={capture.meterLevel}
-                    detachProgress={dockProgress}
-                    rowsInert={captureDetached}
-                    onCancel={capture.cancel}
-                    onPause={capture.pause}
-                    onResume={capture.resume}
-                    onStartOver={capture.startOver}
-                    onDone={capture.done}
-                    onDiscard={handleDiscardWithThud}
-                  />
-                )}
-              </View>
-            )}
+            {/* Trailer, Slate and the TMDB score all used to sit here, in a row of
+                glass plates below the synopsis. The two verbs now float on their own
+                island beside the capture pill (FloatingVerbs), and the score moved into
+                the Details tab's bento where the rest of the film's facts live. The stub
+                ends at the synopsis on purpose — nothing tappable rides the sheet. */}
           </View>
 
           {/* Tear right below the synopsis */}
@@ -1027,15 +967,15 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
             {movie && view === 'info' && (
               <MemoizedMovieTabBar
                 activeTab={activeTab}
-                setActiveTab={setActiveTab}
+                setActiveTab={selectTab}
                 movie={movie}
                 onTrailerSelect={(videoKey) => setSelectedVideo(videoKey)}
-                scrollViewRef={mainScrollViewRef}
                 onSimilarMovieSelect={onOpenMovie}
+                onExpandArtwork={setExpandedArtwork}
               />
             )}
             {movie && view === 'entries' && (
-              <MovieEntriesTab takes={takes} onChanged={refreshTakes} shrink={barShrink} />
+              <MovieEntriesTab takes={takes} onChanged={refreshTakes} shrink={scrollFold} />
             )}
           </View>
 
@@ -1070,47 +1010,60 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
           unmounting them: any recording keeps running. */}
       <ReAnimated.View
         style={[StyleSheet.absoluteFill, chromeFadeStyle]}
-        pointerEvents={cinema ? 'none' : 'box-none'}
+        pointerEvents={cinema || expandedArtwork ? 'none' : 'box-none'}
       >
-        {/* The dock (Paper 04–05) — the verb row's landing seat, rising and fading
-            in step with dockProgress as the panel's row vacates. Mounted for the
-            whole take so the glide is continuous and reversible; only TOUCH
-            ownership flips (captureDetached). */}
-        {capture.status !== 'idle' && (
-          <ReAnimated.View
-            style={[styles.captureDockWrap, { bottom: insets.bottom + 14 }, dockStyle]}
-            pointerEvents={captureDetached ? 'box-none' : 'none'}
-          >
-            <StubCapturePanel
-              docked
-              status={capture.status}
-              remainingMs={capture.remainingMs}
-              durationMs={capture.durationMs}
-              level={capture.meterLevel}
-              onCancel={capture.cancel}
-              onPause={capture.pause}
-              onResume={capture.resume}
-              onStartOver={capture.startOver}
-              onDone={capture.done}
-              onDiscard={handleDiscardWithThud}
-            />
-          </ReAnimated.View>
+        {/* THE FLOOR — two islands, the nav's own grammar. Trailer and Slate share a
+            pill on the left; the mic is a single glass disc on the right, holding the same
+            seat the nav's search satellite does. Tapping the mic grows its recess leftward
+            across the island's footprint until the two holes touch, neck and merge into one
+            trough holding save / delete / restart / resume.
+
+            The row is a FIXED width and the two islands trade it between them (one reaches
+            zero width as the other grows), so the run's total is identical at every frame
+            and nothing can drift sideways. `flex-end` bottom-aligns them, which matters
+            because the capture pill is taller than the island — it stacks the elapsed clock
+            above itself.
+
+            It lives inside the chrome-fade layer so cinema mode and the artwork viewer dim
+            it out without unmounting it — a recording in progress must survive both. */}
+        {movie && (
+          <View style={styles.captureBarWrap} pointerEvents="box-none">
+            <View style={styles.floorRow} pointerEvents="box-none">
+              <FloatingVerbs
+                collapsed={isCaptureLive(capture.status, capture.remainingMs, capture.durationMs)}
+                onTrailer={handleTrailerPress}
+                trailerDisabled={trailers.length === 0 && !trailersLoading}
+                trailerBusy={trailerBusy}
+                favorited={favorited}
+                onToggleFavorite={handleToggleFavorite}
+              />
+              <CaptureWell
+                status={capture.status}
+                remainingMs={capture.remainingMs}
+                durationMs={capture.durationMs}
+                level={capture.meterLevel}
+                onStart={handleRecordPress}
+                onCancel={capture.cancel}
+                onPause={capture.pause}
+                onResume={capture.resume}
+                onStartOver={capture.startOver}
+                onDone={capture.done}
+                onDiscard={handleDiscardWithThud}
+              />
+            </View>
+          </View>
         )}
 
-        {/* Save confetti — screen-owned, so it plays out even as a dock unmounts. */}
+        {/* Save confetti — screen-owned, so it plays out even as the bar changes pose. */}
         {confettiBurst > 0 && <ConfettiRain key={confettiBurst} />}
 
-        {/* Rides the top bar's scroll-reactive transform so it folds with the chevron. */}
-        {(capture.status === 'recording' || capture.status === 'paused') && (
-          <CaptureStatusBadge
-            paused={capture.status === 'paused'}
-            style={[styles.liveBadge, { top: TOP_BAR_TOP + 2 }]}
-            animatedStyle={topBarAnimStyle}
-          />
-        )}
+        {/* The LIVE / PAUSED readout moved INTO the top bar's own row (it takes the
+            star's slot while a take is live). As a floating overlay out here it sat
+            under the header scrim and got blurred on scroll, reading as a separate
+            thing stuck to the screen rather than part of the bar. */}
       </ReAnimated.View>
 
-      {/* Watchlist / warning feedback — NO bubble: an accent icon over a letterspaced
+      {/* Slate / warning feedback — NO bubble: an accent icon over a letterspaced
           caps line, rising in and out. Modern, quiet, matches the app's type voice. */}
       {toast && (
         <View style={[styles.toastWrap, { top: TOP_BAR_TOP + 58 }]} pointerEvents="none">
@@ -1137,15 +1090,47 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
       {/* Top scrim — blur + dark fade that appears in step with the logo fading out, so the
           controls below read clearly over the bright backdrop. */}
       <ReAnimated.View style={[styles.headerScrim, headerScrimStyle]} pointerEvents="none">
-        <BlurView
-          intensity={32}
-          tint="dark"
-          experimentalBlurMethod="dimezisBlurView"
+        {/* THE BLUR IS MASKED, NOT CUT.
+            A BlurView simply ends where its box ends, and that edge is a hard switch from
+            blurred to sharp — the line that used to run across the poster. MaskedView clips
+            by ALPHA, so a vertical gradient mask makes the blur genuinely weaken to nothing
+            and there is no boundary to find.
+
+            WHERE THE FADE ENDS IS THE WHOLE BALANCE. Fading it over the scrim's full height
+            left a long stretch of WEAK blur, and weak blur over text is not blur — it is
+            fog. So the blur is strong and SHORT: full behind the bar, gone by 72% of the
+            scrim, and the bottom quarter carries no blur at all, only the tint's tail. The
+            fade is still ~40pt long, which is far more than enough to hide the edge. */}
+        <MaskedView
           style={StyleSheet.absoluteFill}
-        />
+          maskElement={
+            <LinearGradient
+              colors={['#000', '#000', 'transparent']}
+              locations={[0, 0.3, 0.72]}
+              style={StyleSheet.absoluteFill}
+            />
+          }
+        >
+          <BlurView
+            intensity={44}
+            tint="dark"
+            experimentalBlurMethod="dimezisBlurView"
+            style={StyleSheet.absoluteFill}
+          />
+        </MaskedView>
+
+        {/* The darkening dies out on a curve — a straight ramp reads as a band with an end.
+            Lighter than it was: with the blur doing more work the tint does not have to,
+            and the tint is what greys whatever scrolls under it. */}
         <LinearGradient
-          colors={['rgba(0,0,0,0.78)', 'rgba(0,0,0,0.45)', 'transparent']}
-          locations={[0, 0.6, 1]}
+          colors={[
+            'rgba(0,0,0,0.52)',
+            'rgba(0,0,0,0.36)',
+            'rgba(0,0,0,0.17)',
+            'rgba(0,0,0,0.05)',
+            'transparent',
+          ]}
+          locations={[0, 0.34, 0.58, 0.8, 1]}
           style={StyleSheet.absoluteFill}
         />
       </ReAnimated.View>
@@ -1155,20 +1140,20 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
           Cinema mode fades the whole bar and mutes its touches. */}
       <ReAnimated.View
         style={[styles.topBar, { top: TOP_BAR_TOP }, chromeFadeStyle]}
-        pointerEvents={cinema ? 'none' : 'box-none'}
+        // Faded chrome must also stop taking touches — topBar sits at zIndex 1000 and
+        // would otherwise keep swallowing taps meant for the viewer beneath it.
+        pointerEvents={cinema || expandedArtwork ? 'none' : 'box-none'}
       >
-        <ReAnimated.View style={topBarAnimStyle}>
-          <Pressable
-            onPress={onBack}
-            hitSlop={10}
-            style={styles.closeBtn}
-            accessibilityRole="button"
-            accessibilityLabel={nested ? 'Back' : 'Close'}
-          >
-            {/* Nested detail slid in from the right → back chevron; root sheet → down. */}
-            <Ionicons name={nested ? 'chevron-back' : 'chevron-down'} size={26} color="#fff" style={styles.closeChevron} />
-          </Pressable>
-        </ReAnimated.View>
+        <Pressable
+          onPress={onBack}
+          hitSlop={10}
+          style={styles.closeBtn}
+          accessibilityRole="button"
+          accessibilityLabel={nested ? 'Back' : 'Close'}
+        >
+          {/* Nested detail slid in from the right → back chevron; root sheet → down. */}
+          <Ionicons name={nested ? 'chevron-back' : 'chevron-down'} size={26} color="#fff" style={styles.closeChevron} />
+        </Pressable>
 
         {/* The star (Paper's notch model) replaces the INFO/ENTRIES toggle: a hollow
             cutout until this film has an entry, enrichment prints dots around it,
@@ -1181,28 +1166,24 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
             long name is ellipsised rather than running under them, and never
             touchable: the star underneath it stays reachable. */}
         <View style={styles.headerTitleWrap} pointerEvents="none">
-          {/* Wrapped in topBarAnimStyle, the SAME style the chevron and the star
-              wear, so all three shrink, lift and dim together on scroll-down. It
-              was the one thing up here on its own clock, which is exactly why it
-              stood apart from them. */}
-          <ReAnimated.View style={topBarAnimStyle}>
-            <ReAnimated.View style={headerTitleStyle}>
-              {/* Long titles scale down to fit rather than being cut off — a name
-                  the user cannot finish reading is worse than a slightly smaller
-                  one. Below the floor it still ellipsises, as a last resort. */}
-              <Text
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.7}
-                style={styles.headerTitle}
-              >
-                {movie?.title ?? ''}
-              </Text>
-            </ReAnimated.View>
+          <ReAnimated.View style={headerTitleStyle}>
+            {/* Long titles scale down to fit rather than being cut off — a name the user
+                cannot finish reading is worse than a slightly smaller one. Below the floor
+                it still ellipsises, as a last resort. This is why the bar no longer
+                shrinks on scroll: a smaller bar re-runs this fit, so a long name would
+                resize under the reader's eye every time the direction changed. */}
+            <Text
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.62}
+              style={styles.headerTitle}
+            >
+              {movie?.title ?? ''}
+            </Text>
           </ReAnimated.View>
         </View>
 
-        <ReAnimated.View style={topBarAnimStyle}>
+        <View>
           {capture.status === 'idle' ? (
             <EntriesStar
               takesCount={takes.length}
@@ -1214,9 +1195,18 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
               onNoEntries={() => showToast('warning', 'No entries yet — record a take first', 'Your takes live here once you speak one')}
             />
           ) : (
-            <View style={styles.topBarSpacer} />
+            /* The take's state takes the star's SLOT while one is live — it is not a
+               separately-positioned overlay any more. Sitting in the row means it keeps the
+               chevron and the title's exact places and renders above the header scrim
+               instead of being blurred by it. */
+            <CaptureStatusBadge
+              paused={capture.status === 'paused'}
+              // State only. The 3·2·1 itself belongs to the full-screen overlay in the
+              // middle of the page — counting down here as well read as a second timer.
+              arming={capture.status === 'arming'}
+            />
           )}
-        </ReAnimated.View>
+        </View>
       </ReAnimated.View>
 
       {/* CINEMA — the trailer cluster ABOVE the logo band (logo stays visible, lit,
@@ -1228,6 +1218,13 @@ const MovieDetailsView = ({ movieId, nested, dispense, onOpenMovie, onBack, auto
         bottomOffset={LOGO_BOTTOM + 200}
         ratingBottom={LOGO_BOTTOM - 64}
       />
+
+      {/* Extras artwork viewer — LAST sibling on purpose, so it stacks above the ticket,
+          the capture chrome and the cinema player. It is a plain absoluteFill layer, not
+          a Modal: Reanimated shared-value styles don't reach a Modal's separate native
+          root on iOS (see ArtworkViewer's header). It also has to live out here rather
+          than inside MovieTabBar, which renders within the ScrollView and would clip it. */}
+      <ArtworkViewer item={expandedArtwork} onClose={() => setExpandedArtwork(null)} />
     </View>
   );
 };
@@ -1344,96 +1341,30 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 },
   },
-  // Rating row (content area): TMDB wordmark + star score (left) · Watchlist / Trailer (right).
-  // ── Stub head — primary verb on top, then Trailer · TMDB · Watchlist ───────
-  // Record CTA: accent-tinted glass, full-width — the ticket's one loud action.
-  stubRecordTouch: {
-    paddingHorizontal: 20,
-    marginTop: 10,
-    marginBottom: 4,
-  },
-  // Detached dock — bottom-anchored seat for the compact capture panel.
-  captureDockWrap: {
+  // Identical to the tab bar's own wrapper: full width, centred, a fixed NAV_BOTTOM off
+  // the hardware edge. It used to be `insets.bottom + 14`, which on a home-indicator
+  // phone parked it 28pt ABOVE where the nav sits — the pill was in a different place
+  // on the movie screen than on every tab. The pill's margins come from its own PILL_W,
+  // so nothing here needs a side inset.
+  captureBarWrap: {
     position: 'absolute',
-    left: 20,
-    right: 20,
+    left: 0,
+    right: 0,
+    bottom: NAV_BOTTOM,
+    alignItems: 'center',
     zIndex: 850,
   },
-  stubRecordBtn: {
-    height: 44,
-    borderRadius: 12,
+  // The floor's run. `flex-end` twice over, and both matter:
+  //   · horizontally, the capture pill is pinned to the right edge no matter how wide the
+  //     verbs island happens to be, so opening a label pushes the island LEFT rather than
+  //     shoving the mic off the run;
+  //   · vertically, the two islands share a baseline — the pill is the taller of the pair
+  //     because it stacks the elapsed clock above itself.
+  floorRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.24)',
-    overflow: 'hidden', // clips the shimmer band
-  },
-  stubRecordLabel: {
-    color: ink(0.95),
-    fontSize: 12.5,
-    fontWeight: '800',
-    letterSpacing: 1.4,
-  },
-  stubActionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 20,
-    marginTop: 16, // breathing room off the synopsis above
-    marginBottom: 2, // the record module's marginTop completes the pair's gap
-  },
-  // Layout-only on the touchable (Fabric landmine) — visuals live on the inner View.
-  stubActionTouch: {
-    flex: 1,
-  },
-  // Liquid glass: translucent white over the ticket — clearly a SUB-CTA, not solid.
-  stubGlassBtn: {
-    height: 36,
-    borderRadius: 12, // rectangle-ish per the Paper flow — squared off from the old full pill
-
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    backgroundColor: 'rgba(255,255,255,0.14)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.22)',
-  },
-  stubGlassLabel: {
-    color: ink(0.95),
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  stubGlassBtnDisabled: {
-    opacity: 0.45,
-  },
-  tmdbLogoWrap: {
-    width: TMDB_LOGO_W,
-    height: TMDB_LOGO_H,
-  },
-  tmdbLogo: {
-    width: '100%',
-    height: '100%',
-  },
-  tmdbScoreBubble: {
-    position: 'absolute',
-    left: TMDB_BUBBLE_LEFT,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tmdbScore: {
-    color: TMDB_NAVY,
-    fontSize: 10.5,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+    alignItems: 'flex-end',
+    justifyContent: 'flex-end',
+    width: FLOOR_RUN_W,
   },
   // ── Snapshot — the bento voice at the top of the stub ──────────────────────
   ticketStatRow: {
@@ -1483,11 +1414,6 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   // Recording status readout, top-right (paired with TOP_BAR_TOP).
-  liveBadge: {
-    position: 'absolute',
-    right: 14,
-    zIndex: 1001,
-  },
   // Action-feedback toast (Save / Trailer) — a small centered glass pill near the top.
   toastWrap: {
     position: 'absolute',
@@ -1512,14 +1438,19 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 6,
   },
-  // Scroll-driven scrim behind the top bar — its opacity is animated by headerScrimStyle.
-  // Height covers the bar; bump it alongside TOP_BAR_TOP if you move the bar down.
+  // The scrim behind the top bar — its opacity is animated by headerScrimStyle.
+  //
+  // TALLER THAN THE BAR, BUT ONLY JUST. A fade needs distance — the original 70pt scrim had
+  // to go from opaque to nothing in the space the bar itself occupies, which is why it read
+  // as a band with a bottom edge. 150 fixed that and overcorrected: everything scrolling
+  // under it picked up a haze. 110 is the middle — enough room for the blur to die
+  // gracefully, little enough that the stub's stat row stays clear of it.
   headerScrim: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    height: TOP_BAR_TOP + 55,
+    height: TOP_BAR_TOP + 95,
     zIndex: 999,
   },
   // Top bar over the hero: close button (left) + the INFO / ENTRIES toggle (center).
@@ -1570,51 +1501,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.65)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 6,
-  },
-  topBarSpacer: {
-    width: 40,
-    height: 40,
-  },
-  glassTint: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.34)',
-  },
-  // Segmented INFO / ENTRIES toggle — a glass pill with the active segment highlighted.
-  toggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    height: 36,
-    borderRadius: 18,
-    overflow: 'hidden',
-    paddingHorizontal: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-  },
-  toggleItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 14,
-  },
-  toggleItemActive: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
-  },
-  toggleText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1,
-  },
-  toggleTextActive: {
-    color: '#fff',
-  },
-  toggleDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#9ccadf',
   },
   // Semi-collapsed synopsis, just under the hero logo. Horizontal inset matches the meta
   // row + the details card (MovieTabBar) below — everything aligns to a single 20px column.
@@ -1682,6 +1568,20 @@ const MovieDetailsScreen = () => {
   // Suppresses the slide on the very first mount (the sheet itself is animating in).
   const hasNavigated = useRef(false);
 
+  // Which tab each level of the chain was left on, parallel to movieStack.
+  //
+  // This HAS to live up here. Only one details view is mounted, and its key changes on
+  // every push and pop, so the view unmounts and its own tab state dies with it — going
+  // back from a similar movie dumped you on Details even though you left from Similar. The
+  // stack owner already holds the ids; it holds the tabs the same way.
+  //
+  // A ref, not state: nothing here should cause a render, and the value is only ever read
+  // while rendering a level that has just changed for another reason.
+  const tabStack = useRef<TabType[]>(['details']);
+  // The live depth, so the callbacks below can stay referentially stable — a new identity
+  // each render would defeat the memo on the details view.
+  const depthRef = useRef(1);
+
   const slideEnter = React.useCallback((values: EntryAnimationsValues) => {
     'worklet';
     return {
@@ -1708,15 +1608,26 @@ const MovieDetailsScreen = () => {
     };
   }, [navDir]);
 
+  const rememberTab = React.useCallback((tab: TabType) => {
+    tabStack.current[depthRef.current - 1] = tab;
+  }, []);
+
   const pushMovie = React.useCallback((movieId: number) => {
     hasNavigated.current = true;
     navDir.value = 1;
+    // A new movie always opens on Details — remembering a tab is about returning to a
+    // layer you left, not about carrying your last choice onto a film you have not seen.
+    tabStack.current[depthRef.current] = 'details';
     setMovieStack((s) => [...s, String(movieId)]);
   }, [navDir]);
 
   const popMovie = React.useCallback(() => {
     navDir.value = -1;
     setMovieStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+    // Drop the level being left so a later visit to the same movie starts on Details
+    // rather than inheriting a tab from a trip the user has already backed out of.
+    // Outside the updater on purpose: a state updater must stay pure.
+    if (depthRef.current > 1) tabStack.current.length = depthRef.current - 1;
   }, [navDir]);
 
   const dismissSheet = React.useCallback(() => {
@@ -1725,6 +1636,7 @@ const MovieDetailsScreen = () => {
 
   const depth = movieStack.length;
   const current = movieStack[depth - 1];
+  depthRef.current = depth;
 
   return (
     <View style={{ flex: 1, backgroundColor: 'black', overflow: 'hidden' }}>
@@ -1744,6 +1656,10 @@ const MovieDetailsScreen = () => {
           onOpenMovie={pushMovie}
           onBack={depth > 1 ? popMovie : dismissSheet}
           autoTrailer={depth === 1 && !hasNavigated.current && trailer === '1'}
+          // Read at mount, and the view is remounted on every level change — which is
+          // exactly what makes coming back land on the tab that was left.
+          initialTab={tabStack.current[depth - 1] ?? 'details'}
+          onTabChange={rememberTab}
         />
       </ReAnimated.View>
     </View>

@@ -6,15 +6,28 @@
  */
 
 import React from 'react';
-import { View, Text, TouchableOpacity, Image, Dimensions, ScrollView, Alert, StyleSheet } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  FlatList,
+  Platform,
+  StyleSheet,
+  type StyleProp,
+  type ViewStyle,
+  type GestureResponderEvent,
+} from 'react-native';
+// expo-image, not RN's Image: the rails need `cachePolicy="memory-disk"` so leaving
+// the tab and coming back doesn't re-download the whole gallery, plus recyclingKey
+// so FlatList can reuse card views without flashing the previous movie's art.
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { fetchMovieVideos, TMDB_CONFIG } from '../../services/api';
-import { useState, useEffect } from 'react';
+import { fetchMovieVideos, fetchMovieImages } from '../../services/api';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import MovieDetailsTab from './MovieDetailsTab';
 import MovieCastTab from './MovieCastTab';
 import MovieSimilarTab from './MovieSimilarTab';
-import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system/legacy';
+import { type ArtworkSource } from './ArtworkViewer';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import type {
   MovieTabBarProps,
@@ -27,35 +40,10 @@ const TAB_CONTENT_TOP = 16;
 const TAB_SECTION_GAP = 24;
 const SECTION_TITLE_GAP = 12;
 
-const getCacheImageUri = (fileName: string) => {
-  if (!FileSystem.cacheDirectory) {
-    throw new Error('File-system cache directory is unavailable');
-  }
-  return `${FileSystem.cacheDirectory}${fileName}`;
-};
-
-/**
- * Downloads an image to cache and opens the OS share sheet directly — no
- * intermediate "what would you like to do?" dialog.
- */
-const shareImage = async (imageUrl: string, fileName: string, dialogTitle: string) => {
-  try {
-    const isAvailable = await Sharing.isAvailableAsync();
-    if (!isAvailable) {
-      Alert.alert('Error', 'Sharing is not available on this device');
-      return;
-    }
-    const downloadResult = await FileSystem.downloadAsync(imageUrl, getCacheImageUri(fileName));
-    await Sharing.shareAsync(downloadResult.uri, {
-      mimeType: 'image/jpeg',
-      dialogTitle,
-    });
-    await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true });
-  } catch (error) {
-    console.error('Error sharing image:', error);
-    Alert.alert('Error', 'Failed to share image');
-  }
-};
+// Downloading + sharing moved into ArtworkViewer along with the tap target. Tapping a
+// card used to go STRAIGHT to the OS share sheet, which meant there was no way to
+// actually look at the artwork, and saving it took two taps. Now the card expands and
+// owns both actions, one tap each.
 
 /**
  * NOTE: These sections live at MODULE scope on purpose. When they were declared
@@ -63,6 +51,168 @@ const shareImage = async (imageUrl: string, fileName: string, dialogTitle: strin
  * type, so React unmounted + remounted each section — loading state reset, the
  * fetch effects re-ran, and the whole Extras tab flickered uncontrollably.
  */
+
+// ── Extras rails ────────────────────────────────────────────────────────────
+// All three rails are virtualized and paged.
+//
+// Paging here buys NO API calls: /movie/{id}/images returns every file path in a
+// single response, so the full list is already in memory and cached — "load more"
+// is a setState, never a request. It exists to bound how many full-size images we
+// pull over the network. A big release carries ~200 textless backdrops (Supergirl:
+// 197 backdrops + 38 posters ≈ 22 MB) and the old plain ScrollView mounted every
+// card the moment the tab opened, firing all of that in one burst.
+//
+// FlatList does the real work — only cards near the viewport mount, so downloads
+// follow the swipe. RAIL_PAGE caps the worst case on top of that.
+const RAIL_PAGE = 12;
+const RAIL_GAP = 12;       // must match extrasStyles.rail's `gap` — getItemLayout depends on it
+const WIDE_CARD_W = 280;   // trailers + backdrops
+const WIDE_CARD_H = 160;
+const POSTER_CARD_W = 120;
+const POSTER_CARD_H = 180;
+
+// The floating viewer expands with a UNIFORM scale, so its card must share the rail
+// card's aspect exactly — otherwise the image visibly stretches on the way out and back.
+const WIDE_ASPECT = WIDE_CARD_W / WIDE_CARD_H;
+const POSTER_ASPECT = POSTER_CARD_W / POSTER_CARD_H;
+
+// Shared FlatList tuning: small batches keep the JS thread free while swiping, and
+// removeClippedSubviews lets RN detach off-screen cards from the native view tree.
+const railProps = {
+  horizontal: true as const,
+  showsHorizontalScrollIndicator: false,
+  initialNumToRender: 4,
+  maxToRenderPerBatch: 4,
+  windowSize: 3,
+  // Android only. On iOS this detaches card views from the native hierarchy for little
+  // benefit, and detached views break anything that needs to read their geometry — it
+  // is what silently killed the first version of the artwork tap. Virtualization
+  // (windowSize / maxToRenderPerBatch) already does the real work on both platforms.
+  removeClippedSubviews: Platform.OS === 'android',
+};
+
+// Card widths are fixed, so hand FlatList the geometry instead of making it measure
+// every card — no per-card layout pass, and no scroll jitter as views recycle.
+const railLayout = (cardWidth: number) => (_data: unknown, index: number) => ({
+  length: cardWidth + RAIL_GAP,
+  offset: (cardWidth + RAIL_GAP) * index,
+  index,
+});
+
+/**
+ * Reveals RAIL_PAGE items at a time from a list that is ALREADY in memory. Resets
+ * when the source list changes, so switching movies never inherits the previous
+ * movie's expanded state.
+ */
+const usePagedRail = <T,>(items: T[]) => {
+  const [shown, setShown] = useState(RAIL_PAGE);
+  useEffect(() => setShown(RAIL_PAGE), [items]);
+  const visible = useMemo(() => items.slice(0, shown), [items, shown]);
+  const loadMore = useCallback(() => setShown((n) => n + RAIL_PAGE), []);
+  return { visible, loadMore, remaining: Math.max(0, items.length - shown) };
+};
+
+/**
+ * A rail card that reports its on-screen rect when tapped, so the viewer can expand
+ * FROM it and collapse back TO it — even after the rail has been scrolled.
+ *
+ * The rect is derived from the TOUCH, not from measureInWindow. `pageX/pageY` is the
+ * touch in window coordinates and `locationX/locationY` is that same point relative to
+ * this card, so the difference is the card's top-left corner. Width and height are the
+ * constants that also drive the card styles, so the rect is exact.
+ *
+ * The first version used `measureInWindow` and did nothing when it returned zeros. It
+ * returned zeros constantly: FlatList's removeClippedSubviews detaches card views from
+ * the native hierarchy, and a detached view measures as 0×0. The guard then swallowed
+ * every tap — no error, no viewer, no clue. This way is synchronous, has no failure
+ * mode, and cannot silently drop a tap.
+ *
+ * The press target exactly covers the card, which is what keeps locationX/locationY
+ * card-relative rather than relative to some inner image.
+ */
+const RailCard = ({
+  style,
+  cardWidth,
+  cardHeight,
+  onExpand,
+  children,
+}: {
+  style: StyleProp<ViewStyle>;
+  cardWidth: number;
+  cardHeight: number;
+  onExpand: (origin: { x: number; y: number; width: number; height: number }) => void;
+  children: React.ReactNode;
+}) => {
+  const handlePress = useCallback(
+    (e: GestureResponderEvent) => {
+      const { pageX, pageY, locationX, locationY } = e.nativeEvent;
+      onExpand({
+        x: pageX - locationX,
+        y: pageY - locationY,
+        width: cardWidth,
+        height: cardHeight,
+      });
+    },
+    [cardWidth, cardHeight, onExpand]
+  );
+
+  // Structure is deliberately identical to the trailers rail (a sized View wrapping an
+  // absoluteFill TouchableOpacity). The touch target exactly covers the card either
+  // way, so locationX/locationY stay card-relative — but this is the markup that is
+  // known to lay out correctly inside a horizontal FlatList here, and swapping it for a
+  // bare Pressable is not worth the risk for a press-opacity nicety.
+  return (
+    <View style={style}>
+      <TouchableOpacity onPress={handlePress} activeOpacity={0.85} style={StyleSheet.absoluteFill}>
+        {children}
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+/** Tail tile that reveals the next page. Icon AND label — never an icon alone. */
+const LoadMoreCard = ({
+  remaining,
+  onPress,
+  style,
+}: {
+  remaining: number;
+  onPress: () => void;
+  style: StyleProp<ViewStyle>;
+}) => (
+  <TouchableOpacity
+    onPress={onPress}
+    style={[style, extrasStyles.loadMoreCard]}
+    accessibilityRole="button"
+    accessibilityLabel={`Load ${remaining} more`}
+  >
+    <Ionicons name="add-circle-outline" size={24} color="rgba(255,255,255,0.75)" />
+    <Text style={extrasStyles.loadMoreLabel}>Load more</Text>
+    <Text style={extrasStyles.loadMoreCount}>{remaining} left</Text>
+  </TouchableOpacity>
+);
+
+/**
+ * YouTube only guarantees hqdefault — maxresdefault 404s on older and unofficial
+ * uploads. Start high (it's the only true 16:9 size; hqdefault is 4:3 letterboxed
+ * and would show black bars in a 280×160 card) and step down once if it's missing.
+ */
+const TrailerThumb = ({ videoKey }: { videoKey: string }) => {
+  const [fallback, setFallback] = useState(false);
+  return (
+    <Image
+      source={{
+        uri: `https://img.youtube.com/vi/${videoKey}/${fallback ? 'hqdefault' : 'maxresdefault'}.jpg`,
+      }}
+      style={extrasStyles.cardImage}
+      contentFit="cover"
+      transition={150}
+      cachePolicy="memory-disk"
+      recyclingKey={videoKey}
+      onError={() => setFallback(true)}
+    />
+  );
+};
 
 /**
  * TrailersSection Component
@@ -75,21 +225,33 @@ const TrailersSection = ({
   const [videos, setVideos] = useState<MovieVideo[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Fetch trailers on component mount
+  // Fetch trailers on component mount.
+  // `cancelled` is defensive rather than a fix for an observed bug: today the detail
+  // layer is keyed by movie id, so this remounts per movie and `movieId` never changes
+  // under a request in flight. The guard keeps that true if the keying ever changes,
+  // and stops a response landing after the sheet is dismissed.
   useEffect(() => {
+    let cancelled = false;
+
     const loadVideos = async () => {
       try {
         const fetchedVideos = await fetchMovieVideos(movieId);
-        setVideos(fetchedVideos);
+        if (!cancelled) setVideos(fetchedVideos);
       } catch (error) {
         console.error('Error loading videos:', error);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     loadVideos();
+    return () => {
+      cancelled = true;
+    };
   }, [movieId]);
+
+  // Above the early returns — hook order has to be identical on every render.
+  const { visible, loadMore, remaining } = usePagedRail(videos);
 
   if (loading) {
     return (
@@ -108,24 +270,20 @@ const TrailersSection = ({
   }
 
   return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
+    <FlatList
+      {...railProps}
+      data={visible}
+      keyExtractor={(item) => item.id}
+      getItemLayout={railLayout(WIDE_CARD_W)}
       contentContainerStyle={extrasStyles.rail}
-    >
-      {videos.map((video) => (
-        <TouchableOpacity
-          key={video.id}
-          onPress={() => onTrailerSelect(video.key)}
-          style={extrasStyles.wideCard}
-        >
-          <Image
-            source={{
-              uri: `https://img.youtube.com/vi/${video.key}/maxresdefault.jpg`,
-            }}
-            style={extrasStyles.cardImage}
-            defaultSource={{ uri: `https://img.youtube.com/vi/${video.key}/hqdefault.jpg` }}
-          />
+      ListFooterComponent={
+        remaining > 0 ? (
+          <LoadMoreCard remaining={remaining} onPress={loadMore} style={extrasStyles.wideCard} />
+        ) : null
+      }
+      renderItem={({ item: video }) => (
+        <TouchableOpacity onPress={() => onTrailerSelect(video.key)} style={extrasStyles.wideCard}>
+          <TrailerThumb videoKey={video.key} />
           <LinearGradient
             colors={['transparent', 'rgba(0,0,0,0.8)']}
             style={extrasStyles.trailerScrim}
@@ -136,8 +294,8 @@ const TrailersSection = ({
             </Text>
           </LinearGradient>
         </TouchableOpacity>
-      ))}
-    </ScrollView>
+      )}
+    />
   );
 };
 
@@ -145,34 +303,40 @@ const TrailersSection = ({
  * BackdropsSection Component
  * Displays movie backdrop images — tap shares the full-res image directly.
  */
-const BackdropsSection = ({ movieId }: { movieId: string }) => {
+const BackdropsSection = ({
+  movieId,
+  onExpand,
+}: {
+  movieId: string;
+  onExpand: (item: ArtworkSource) => void;
+}) => {
   const [backdrops, setBackdrops] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false; // see the note on TrailersSection's effect
+
     const loadBackdrops = async () => {
       try {
-        const response = await fetch(
-          `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images`,
-          {
-            method: 'GET',
-            headers: TMDB_CONFIG.headers,
-          }
-        );
-        const data = await response.json();
-        const cleanBackdrops = (data.backdrops || [])
-          .filter((backdrop: any) => !backdrop.iso_639_1)
-          .map((backdrop: any) => backdrop.file_path);
-        setBackdrops(cleanBackdrops);
+        // Shared artwork call — the hero and the detail backdrop already made it for
+        // this movie, so opening Extras hits the 30-minute cache instead of the network.
+        const { backdrops: textless } = await fetchMovieImages(movieId);
+        if (!cancelled) setBackdrops(textless);
       } catch (error) {
         console.error('Error loading backdrops:', error);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     loadBackdrops();
+    return () => {
+      cancelled = true;
+    };
   }, [movieId]);
+
+  // Above the early returns — hook order has to be identical on every render.
+  const { visible, loadMore, remaining } = usePagedRail(backdrops);
 
   if (loading) {
     return (
@@ -191,35 +355,55 @@ const BackdropsSection = ({ movieId }: { movieId: string }) => {
   }
 
   return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
+    <FlatList
+      {...railProps}
+      data={visible}
+      keyExtractor={(item) => item}
+      getItemLayout={railLayout(WIDE_CARD_W)}
       contentContainerStyle={extrasStyles.rail}
-    >
-      {backdrops.map((backdrop, index) => {
-        const imageUrl = `https://image.tmdb.org/t/p/original${backdrop}`;
-        return (
-          <TouchableOpacity
-            key={`backdrop-${index}`}
-            onPress={() => shareImage(imageUrl, 'backdrop_image.jpg', 'Share Movie Backdrop')}
-            style={extrasStyles.wideCard}
+      ListFooterComponent={
+        remaining > 0 ? (
+          <LoadMoreCard remaining={remaining} onPress={loadMore} style={extrasStyles.wideCard} />
+        ) : null
+      }
+      renderItem={({ item: backdrop }) => (
+        <RailCard
+          style={extrasStyles.wideCard}
+          cardWidth={WIDE_CARD_W}
+          cardHeight={WIDE_CARD_H}
+          onExpand={(origin) =>
+            onExpand({
+              // w1280 for viewing: big enough to actually study on a phone, far short
+              // of `original`, which runs several MB. Original is fetched only if the
+              // user downloads or shares.
+              viewUri: `https://image.tmdb.org/t/p/w1280${backdrop}`,
+              originalUri: `https://image.tmdb.org/t/p/original${backdrop}`,
+              aspect: WIDE_ASPECT,
+              fileName: 'backdrop_image.jpg',
+              label: 'Backdrop',
+              origin,
+            })
+          }
+        >
+          {/* w780 is deliberate, not lazy: the card is 280pt wide, which is 840px on
+              a 3× screen. Anything smaller would visibly soften. */}
+          <Image
+            source={{ uri: `https://image.tmdb.org/t/p/w780${backdrop}` }}
+            style={extrasStyles.cardImage}
+            contentFit="cover"
+            transition={150}
+            cachePolicy="memory-disk"
+            recyclingKey={backdrop}
+          />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.3)']}
+            style={extrasStyles.hintScrim}
           >
-            <Image
-              source={{
-                uri: `https://image.tmdb.org/t/p/w780${backdrop}`,
-              }}
-              style={extrasStyles.cardImage}
-            />
-            <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.3)']}
-              style={extrasStyles.hintScrim}
-            >
-              <Text style={extrasStyles.hintText}>Share</Text>
-            </LinearGradient>
-          </TouchableOpacity>
-        );
-      })}
-    </ScrollView>
+            <Text style={extrasStyles.hintText}>View</Text>
+          </LinearGradient>
+        </RailCard>
+      )}
+    />
   );
 };
 
@@ -227,34 +411,40 @@ const BackdropsSection = ({ movieId }: { movieId: string }) => {
  * PostersSection Component
  * Displays movie poster images — tap shares the full-res image directly.
  */
-const PostersSection = ({ movieId }: { movieId: string }) => {
+const PostersSection = ({
+  movieId,
+  onExpand,
+}: {
+  movieId: string;
+  onExpand: (item: ArtworkSource) => void;
+}) => {
   const [posters, setPosters] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false; // see the note on TrailersSection's effect
+
     const loadPosters = async () => {
       try {
-        const response = await fetch(
-          `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images`,
-          {
-            method: 'GET',
-            headers: TMDB_CONFIG.headers,
-          }
-        );
-        const data = await response.json();
-        const cleanPosters = (data.posters || [])
-          .filter((poster: any) => !poster.iso_639_1)
-          .map((poster: any) => poster.file_path);
-        setPosters(cleanPosters);
+        // Same shared, cached call as the hero — so the gallery leads with the same
+        // well-vetted art the cover uses instead of TMDB's raw single-vote-first order.
+        const { posters: textless } = await fetchMovieImages(movieId);
+        if (!cancelled) setPosters(textless);
       } catch (error) {
         console.error('Error loading posters:', error);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     loadPosters();
+    return () => {
+      cancelled = true;
+    };
   }, [movieId]);
+
+  // Above the early returns — hook order has to be identical on every render.
+  const { visible, loadMore, remaining } = usePagedRail(posters);
 
   if (loading) {
     return (
@@ -273,35 +463,51 @@ const PostersSection = ({ movieId }: { movieId: string }) => {
   }
 
   return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
+    <FlatList
+      {...railProps}
+      data={visible}
+      keyExtractor={(item) => item}
+      getItemLayout={railLayout(POSTER_CARD_W)}
       contentContainerStyle={extrasStyles.rail}
-    >
-      {posters.map((poster, index) => {
-        const imageUrl = `https://image.tmdb.org/t/p/original${poster}`;
-        return (
-          <TouchableOpacity
-            key={`poster-${index}`}
-            onPress={() => shareImage(imageUrl, 'poster_image.jpg', 'Share Movie Poster')}
-            style={extrasStyles.posterCard}
+      ListFooterComponent={
+        remaining > 0 ? (
+          <LoadMoreCard remaining={remaining} onPress={loadMore} style={extrasStyles.posterCard} />
+        ) : null
+      }
+      renderItem={({ item: poster }) => (
+        <RailCard
+          style={extrasStyles.posterCard}
+          cardWidth={POSTER_CARD_W}
+          cardHeight={POSTER_CARD_H}
+          onExpand={(origin) =>
+            onExpand({
+              viewUri: `https://image.tmdb.org/t/p/w780${poster}`,
+              originalUri: `https://image.tmdb.org/t/p/original${poster}`,
+              aspect: POSTER_ASPECT,
+              fileName: 'poster_image.jpg',
+              label: 'Poster',
+              origin,
+            })
+          }
+        >
+          {/* w342 ≈ the 120pt card at 3× — right-sized, not downscaled waste. */}
+          <Image
+            source={{ uri: `https://image.tmdb.org/t/p/w342${poster}` }}
+            style={extrasStyles.cardImage}
+            contentFit="cover"
+            transition={150}
+            cachePolicy="memory-disk"
+            recyclingKey={poster}
+          />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.3)']}
+            style={extrasStyles.hintScrim}
           >
-            <Image
-              source={{
-                uri: `https://image.tmdb.org/t/p/w342${poster}`,
-              }}
-              style={extrasStyles.cardImage}
-            />
-            <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.3)']}
-              style={extrasStyles.hintScrim}
-            >
-              <Text style={extrasStyles.hintText}>Share</Text>
-            </LinearGradient>
-          </TouchableOpacity>
-        );
-      })}
-    </ScrollView>
+            <Text style={extrasStyles.hintText}>View</Text>
+          </LinearGradient>
+        </RailCard>
+      )}
+    />
   );
 };
 
@@ -326,8 +532,10 @@ const extrasStyles = StyleSheet.create({
     paddingRight: 20,
   },
   wideCard: {
-    width: 280,
-    height: 160,
+    // Shared with railLayout AND with WIDE_ASPECT (the viewer's expand geometry) —
+    // one value, never three.
+    width: WIDE_CARD_W,
+    height: WIDE_CARD_H,
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -335,18 +543,34 @@ const extrasStyles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
   },
   posterCard: {
-    width: 120,
-    height: 180,
+    // Shared with railLayout AND with POSTER_ASPECT — one value, never three.
+    width: POSTER_CARD_W,
+    height: POSTER_CARD_H,
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: 'rgba(255,255,255,0.05)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
   },
+  // No resizeMode here — expo-image takes `contentFit` as a prop instead.
   cardImage: {
     width: '100%',
     height: '100%',
-    resizeMode: 'cover',
+  },
+  loadMoreCard: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  loadMoreLabel: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  loadMoreCount: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 11,
   },
   trailerScrim: {
     position: 'absolute',
@@ -391,10 +615,10 @@ const extrasStyles = StyleSheet.create({
  * @param movie - Movie data object
  * @param onTrailerSelect - Handler for when a trailer is selected (the detail
  *        screen owns the single cinema player — no player renders here)
- * @param scrollViewRef - Reference to the main scroll view
  */
 const MovieTabBar = ({
-  activeTab, setActiveTab, movie, onTrailerSelect, scrollViewRef, onSimilarMovieSelect
+  activeTab, setActiveTab, movie, onTrailerSelect, onSimilarMovieSelect,
+  onExpandArtwork,
 }: MovieTabBarProps) => {
   // Available tabs configuration
   const tabs: { id: TabType; label: string }[] = [
@@ -404,6 +628,11 @@ const MovieTabBar = ({
     { id: 'similar', label: 'Similar' },
   ];
 
+  // The viewer itself is NOT rendered here. MovieTabBar sits deep inside the detail
+  // page's ScrollView, so a full-screen overlay mounted at this depth would be clipped
+  // by the scroll container. Both galleries just hand the tapped artwork upward and
+  // MovieDetailsView renders the single viewer at its root.
+
   return (
     // Vertical rhythm is owned here: identical top inset + section gap for every tab.
     <View>
@@ -411,10 +640,17 @@ const MovieTabBar = ({
       <View style={tabStyles.tabBar}>
         <View style={tabStyles.tabRow}>
           {tabs.map((tab) => (
+            // activeOpacity={1} is REQUIRED, not a preference. Left at the default (0.2)
+            // the whole tab dims on press and then animates back — and because the press
+            // swaps the tab's entire content (a cast grid, a poster rail), that restore
+            // gets starved and the tab sits there translucent instead of going blue.
             <TouchableOpacity
               key={tab.id}
               onPress={() => setActiveTab(tab.id)}
               style={tabStyles.tabHit}
+              activeOpacity={1}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: activeTab === tab.id }}
             >
               <Text style={[
                 tabStyles.tabLabel,
@@ -443,11 +679,11 @@ const MovieTabBar = ({
             </View>
             <View style={tabStyles.section}>
               <Text style={tabStyles.sectionTitle}>Backdrops</Text>
-              <BackdropsSection movieId={movie.id.toString()} />
+              <BackdropsSection movieId={movie.id.toString()} onExpand={onExpandArtwork} />
             </View>
             <View style={tabStyles.section}>
               <Text style={tabStyles.sectionTitle}>Posters</Text>
-              <PostersSection movieId={movie.id.toString()} />
+              <PostersSection movieId={movie.id.toString()} onExpand={onExpandArtwork} />
             </View>
           </View>
         )}
@@ -476,12 +712,15 @@ const tabStyles = StyleSheet.create({
   tabLabel: {
     color: 'rgba(255,255,255,0.55)',
     fontSize: 16,
-    fontWeight: '500',
+    fontWeight: '600',
     letterSpacing: 0.3,
   },
+  // COLOUR ONLY — the weight must not change. The row is space-between, so a label that
+  // gets wider when it goes bold redistributes every gap in the row, and the other three
+  // tabs visibly shift on each switch. The accent plus the indicator under it already say
+  // "active" without touching the metrics.
   tabLabelActive: {
     color: '#9ccadf',
-    fontWeight: '700',
   },
   tabIndicator: {
     position: 'absolute',

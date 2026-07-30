@@ -95,31 +95,31 @@ export const fetchNowPlayingMovies = async () => {
 //Fetches movie details for any movie
 export const fetchMovieDetails = async (movieId: string): Promise<MovieDetails> => {
   try {
-    // Fetch movie details, release dates, and credits in parallel
-    const [movieResponse, releaseDatesResponse, creditsResponse] = await Promise.all([
-      fetch(`${TMDB_CONFIG.BASE_URL}/movie/${movieId}`, {
+    // ONE request, not three. `append_to_response` folds the release-dates and credits
+    // sub-resources into the same payload, so this costs a single round-trip instead of
+    // three parallel ones — the Discover hero prefetches 7 movies, which was 21 requests
+    // and is now 7. (services/genres.ts already used this pattern; the two agree now.)
+    const response = await fetch(
+      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}?append_to_response=release_dates,credits`,
+      {
         method: 'GET',
         headers: TMDB_CONFIG.headers,
-      }),
-      fetch(`${TMDB_CONFIG.BASE_URL}/movie/${movieId}/release_dates`, {
-        method: 'GET',
-        headers: TMDB_CONFIG.headers,
-      }),
-      fetch(`${TMDB_CONFIG.BASE_URL}/movie/${movieId}/credits`, {
-        method: 'GET',
-        headers: TMDB_CONFIG.headers,
-      })
-    ]);
+      }
+    );
 
-    if (!movieResponse.ok || !releaseDatesResponse.ok || !creditsResponse.ok) {
-      throw new Error(`HTTP error! status: ${movieResponse.status}`);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    const [movieData, releaseDatesData, creditsData] = await Promise.all([
-      movieResponse.json(),
-      releaseDatesResponse.json(),
-      creditsResponse.json()
-    ]);
+    // Appended sub-resources arrive nested under their own keys, in exactly the shape
+    // the standalone /release_dates and /credits endpoints returned. Peel them off so
+    // the `...movieData` spread at the bottom yields the same MovieDetails as before —
+    // no stray release_dates/credits keys leaking into the returned object.
+    const {
+      release_dates: releaseDatesData = { results: [] },
+      credits: creditsData = { crew: [], cast: [] },
+      ...movieData
+    } = await response.json();
 
     // US certification — TMDB lists SEVERAL release entries per country (premiere,
     // limited, theatrical, digital, physical, TV) and many carry an EMPTY
@@ -228,16 +228,84 @@ export const fetchMovieDetails = async (movieId: string): Promise<MovieDetails> 
 };
 
 // ── Movie images ────────────────────────────────────────────────────────────
-// Single source of truth for a movie's artwork. The hero + cards must only ever
-// show TEXTLESS (no-language) posters, with an English-or-textless title logo on
-// top. Requesting `include_image_language=en,null` makes TMDB return just those
-// variants instead of every localized poster — smaller, faster responses, and one
-// shared cache for every screen that needs artwork.
+// THE single source of truth for a movie's artwork — hero, cards, trending rail,
+// the detail backdrop and the Extras galleries all read from here. Requesting
+// `include_image_language=en,null` makes TMDB return just the English + textless
+// variants instead of every localized poster: smaller, faster responses, and one
+// 30-minute cache shared by every screen.
+//
+// Don't add a second /images request anywhere. The Extras tab used to fetch this
+// endpoint twice more on its own (once for posters, once for backdrops), unfiltered
+// and uncached, so opening a movie cost three round-trips to the same URL and the
+// gallery ordered its posters differently from the hero. Everything is served off
+// this one call now — take another field from it rather than fetching again.
 export type MovieImages = {
-  poster: string | null;    // primary textless poster — hero + cards (best-voted)
-  altPoster: string | null; // a DIFFERENT textless poster for the detail view, so it
-                            // doesn't just repeat the cover (falls back to `poster`)
-  logo: string | null;      // english / no-language title logo file_path
+  poster: string | null;        // best-ranked textless poster — hero + cards
+  variantPoster: string | null; // runner-up, but ONLY if independently vetted (see
+                                // MIN_VETTED_VOTES). null means "no safe alternative,
+                                // reuse `poster`" — the detail hero relies on that.
+  logo: string | null;          // english / no-language title logo file_path
+  posters: string[];            // EVERY textless poster, best-ranked first — Extras
+  backdrops: string[];          // every textless backdrop, TMDB order — Extras
+};
+
+// Picking the textless poster — why this is a ranking and not just `posters[0]`.
+//
+// `iso_639_1: null` is a CONTRIBUTOR LABEL, not a fact about the pixels. It only means
+// "whoever uploaded this left the language blank", so full billing-block posters get
+// filed under it all the time. The Odyssey shipped one with the title, both leads'
+// names, the release date and the IMAX credits baked in, and it passed this filter
+// legitimately (2026-07-28).
+//
+// Worse, TMDB returns posters sorted by `vote_average` DESC, and a poster with a
+// single vote scores ~3.33 — above almost every properly-vetted poster on a new
+// release, whose averages settle around 1–2.5 once real votes accumulate. So taking
+// [0] was systematically biased toward the ONE upload nobody but its uploader had
+// seen. That is exactly what the bad Odyssey poster was: 1 vote, 1063px wide, while
+// the genuine textless teaser sat one slot below it with 4 votes at 2000px.
+//
+// So rank rather than trust the order:
+//   · drop anything under MIN_POSTER_WIDTH — studio art is never that small, scrapes are
+//   · score by a Bayesian weighted rating, so 1 vote @ 3.33 can't beat 4 votes @ 2.28
+//   · break ties on resolution, which is what decides the case where nothing is voted on
+//
+// Resolution is ONLY a tie-break, deliberately: ranking it above votes swapped Fight
+// Club's iconic soap poster for a blank sheet of wrapping paper that happened to be
+// bigger. Votes are the signal; pixels are the coin-flip.
+//
+// This stays a heuristic over human labels — nothing short of reading the pixels can
+// promise "no text" — but it now prefers the poster the community actually vetted.
+const MIN_POSTER_WIDTH = 1000; // below this it's a scrape or a screenshot, not studio art
+const VOTE_PRIOR = 3;          // votes a rating must earn before it stands on its own
+
+// Votes a RUNNER-UP poster needs before the detail hero will show it instead of the
+// cover. Two means at least one person besides the uploader has looked at it.
+//
+// This is the whole difference between `variantPoster` and the old `altPoster`. That
+// one took posters[1] unconditionally, which by construction is the less-vetted image
+// — KPop Demon Hunters served its full billing-block poster there, and Fight Club's
+// runner-up is a blank sheet of wrapping paper. Both are ZERO-vote uploads, so a
+// two-vote floor rejects exactly those while still allowing variety where the
+// community has actually weighed in.
+const MIN_VETTED_VOTES = 2;
+
+// Returns the ranked poster OBJECTS (not just paths) — callers need vote_count to
+// decide whether a runner-up is trustworthy enough to show.
+const rankTextlessPosters = (allPosters: any[]): any[] => {
+  const textless = (allPosters || []).filter(
+    (p: any) => !p.iso_639_1 && p.width >= MIN_POSTER_WIDTH
+  );
+  if (textless.length === 0) return [];
+
+  // Bayesian mean: pull every rating toward the set's own average until it has earned
+  // enough votes to be believed on its own.
+  const mean =
+    textless.reduce((sum: number, p: any) => sum + p.vote_average, 0) / textless.length;
+  const score = (p: any) =>
+    (p.vote_count / (p.vote_count + VOTE_PRIOR)) * p.vote_average +
+    (VOTE_PRIOR / (p.vote_count + VOTE_PRIOR)) * mean;
+
+  return [...textless].sort((a: any, b: any) => score(b) - score(a) || b.width - a.width);
 };
 
 export const fetchMovieImages = async (movieId: string): Promise<MovieImages> => {
@@ -257,12 +325,26 @@ export const fetchMovieImages = async (movieId: string): Promise<MovieImages> =>
 
     const data = await response.json();
 
-    // All textless posters, in TMDB's vote order (best first). This one request
-    // already contains every no-language poster, so we can hand out a primary AND an
-    // alternate with zero extra API calls. Language posters are ignored (baked-in text).
-    const posters: string[] = (data.posters || [])
-      .filter((p: any) => !p.iso_639_1)
-      .map((p: any) => p.file_path);
+    // Every no-language poster, ranked by how well-vetted it is (see rankTextlessPosters
+    // above — TMDB's own order is NOT trustworthy here). One request already contains
+    // them all, so every field below costs zero extra API calls. Language posters are
+    // ignored (baked-in text).
+    const ranked = rankTextlessPosters(data.posters);
+    const posters: string[] = ranked.map((p: any) => p.file_path);
+
+    // The runner-up, offered ONLY when the community has actually vetted it. Null here
+    // is meaningful: it tells the detail hero "there is no safe alternative, reuse the
+    // cover" rather than silently handing back a worse image.
+    const runnerUp = ranked[1];
+    const variantPoster: string | null =
+      runnerUp && runnerUp.vote_count >= MIN_VETTED_VOTES ? runnerUp.file_path : null;
+
+    // Textless backdrops for the Extras gallery. Same language rule as posters — a
+    // tagged backdrop has a title or credits burned into it. No ranking here: a
+    // gallery wants breadth, and backdrops carry no vote signal worth sorting on.
+    const backdrops: string[] = (data.backdrops || [])
+      .filter((b: any) => !b.iso_639_1)
+      .map((b: any) => b.file_path);
 
     // Logo: prefer no-language, else an English one (still clean over the poster).
     const logo =
@@ -271,84 +353,16 @@ export const fetchMovieImages = async (movieId: string): Promise<MovieImages> =>
 
     const result: MovieImages = {
       poster: posters[0] ?? null,
-      // Second-best poster for variety on the detail page; if there's only one, reuse it.
-      altPoster: posters[1] ?? posters[0] ?? null,
+      variantPoster,
       logo,
+      posters,
+      backdrops,
     };
     setImageCache(movieId, result);
     return result;
   } catch (error) {
     console.error(`Error fetching images for movie ${movieId}:`, error);
-    return { poster: null, altPoster: null, logo: null };
-  }
-};
-
-interface MovieLanguage {
-  iso_639_1: string;
-  english_name: string;
-  name: string;
-  type: 'Original' | 'Spoken' | 'Dubbed' | 'Subtitled';
-}
-
-// Language name mapping for common languages
-const languageNames: { [key: string]: { english: string, native: string } } = {
-  en: { english: 'English', native: 'English' },
-  es: { english: 'Spanish', native: 'Español' },
-  fr: { english: 'French', native: 'Français' },
-  de: { english: 'German', native: 'Deutsch' },
-  it: { english: 'Italian', native: 'Italiano' },
-  ja: { english: 'Japanese', native: '日本語' },
-  ko: { english: 'Korean', native: '한국어' },
-  zh: { english: 'Chinese', native: '中文' },
-  hi: { english: 'Hindi', native: 'हिन्दी' },
-  ru: { english: 'Russian', native: 'Русский' },
-  pt: { english: 'Portuguese', native: 'Português' },
-  //Add more languages as needed
-};
-
-export const fetchMovieLanguages = async (movieId: string): Promise<MovieLanguage[]> => {
-  try {
-    // Fetch movie details for original language
-    const movieResponse = await fetch(
-      `${TMDB_CONFIG.BASE_URL}/movie/${movieId}`,
-      {
-        method: 'GET',
-        headers: TMDB_CONFIG.headers,
-      }
-    );
-
-    if (!movieResponse.ok) {
-      throw new Error(`HTTP error! status: ${movieResponse.status}`);
-    }
-
-    const movieData = await movieResponse.json();
-    const languages: MovieLanguage[] = [];
-
-    // Add original language
-    const originalLang = movieData.original_language;
-    languages.push({
-      iso_639_1: originalLang,
-      english_name: languageNames[originalLang]?.english || originalLang.toUpperCase(),
-      name: languageNames[originalLang]?.native || originalLang.toUpperCase(),
-      type: 'Original'
-    });
-
-    // Add available subtitles (using spoken_languages as this is more accurate)
-    movieData.spoken_languages.forEach((lang: any) => {
-      if (lang.iso_639_1 !== movieData.original_language) {
-        languages.push({
-          iso_639_1: lang.iso_639_1,
-          english_name: lang.english_name || languageNames[lang.iso_639_1]?.english || lang.iso_639_1.toUpperCase(),
-          name: lang.name || languageNames[lang.iso_639_1]?.native || lang.iso_639_1.toUpperCase(),
-          type: 'Subtitled'
-        });
-      }
-    });
-
-    return languages;
-  } catch (error) {
-    console.error('Error fetching movie languages:', error);
-    return [];
+    return { poster: null, variantPoster: null, logo: null, posters: [], backdrops: [] };
   }
 };
 
@@ -418,38 +432,6 @@ export const pickMainTrailer = (videos: MovieVideo[]): MovieVideo | undefined =>
   const best =
     officialTrailers.length > 0 ? officialTrailers : anyTrailers.length > 0 ? anyTrailers : teasers.length > 0 ? teasers : pool;
   return best[best.length - 1]; // newest of the chosen tier
-};
-
-// Person quick facts for the filmmaker cards (birthday / deathday / birthplace).
-export type PersonDetails = {
-  id: number;
-  birthday: string | null;
-  deathday: string | null;
-  place_of_birth: string | null;
-};
-
-export const fetchPersonDetails = async (personId: number): Promise<PersonDetails | null> => {
-  try {
-    const response = await fetch(`${TMDB_CONFIG.BASE_URL}/person/${personId}`, {
-      method: 'GET',
-      headers: TMDB_CONFIG.headers,
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return {
-      id: data.id,
-      birthday: data.birthday ?? null,
-      deathday: data.deathday ?? null,
-      place_of_birth: data.place_of_birth ?? null,
-    };
-  } catch (error) {
-    console.error(`Error fetching person ${personId}:`, error);
-    return null;
-  }
 };
 
 // Watch providers (JustWatch data via TMDB) — what's streamable / rentable /
