@@ -1,6 +1,6 @@
 import { Stack } from "expo-router";
 import './globals.css';
-import { LogBox, StatusBar } from "react-native";
+import { StatusBar } from "react-native";
 import React from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as ScreenOrientation from "expo-screen-orientation";
@@ -8,14 +8,26 @@ import { FavoritesProvider } from "@/contexts/FavoritesContext";
 import { initEnrichment } from "@/services/enrichment";
 import { loadPrefs } from "@/services/prefs";
 
-// EXPO GO ONLY, AND IT IS TELLING THE TRUTH — expo-media-library cannot get full
-// library access under Expo Go on Android, so saving artwork (ArtworkViewer) is
-// genuinely limited until we cross the dev-build gate. Nothing here fixes that;
-// the notice just fires on every launch and we already know. Kept as a single
-// exact-prefix match so an unrelated media-library problem still surfaces.
-LogBox.ignoreLogs([
-  "Due to changes in Androids permission requirements, Expo Go can no longer provide full access to the media library.",
-]);
+// THREE THIRD-PARTY STARTUP WARNINGS ARE EXPECTED AND DELIBERATELY NOT SILENCED.
+// A console.warn filter was written and then removed: none is ours to fix, none is an error, and
+// a permanent filter that hides library warnings costs more than three lines of terminal noise.
+// If a NEW warning appears we want to read it — that is the whole point.
+//
+//   1. "SafeAreaView has been deprecated"   react-native-css-interop (NativeWind's runtime) does
+//                                           cssInterop(react_native_1.SafeAreaView, …) at load.
+//                                           Every SafeAreaView in OUR source already comes from
+//                                           react-native-safe-area-context. Fixed upstream in
+//                                           nativewind 4.2.6, but that is a styling-runtime bump
+//                                           on a stack that has crashed this app before.
+//   2. "…Expo Go…media library"             TRUE. ArtworkViewer's save-to-library really is
+//                                           degraded until the dev-build gate.
+//   3. "…outdated JSX transform"            react-native-youtube-iframe@2.3.0 ships the classic
+//                                           transform in its dist. ⚠ DO NOT "FIX" THIS BY
+//                                           BUMPING TO 2.4.x — it was tried 2026-07-30 and the
+//                                           trailer stopped playing entirely (2.4.x loads a
+//                                           different remote player page, iframe_v2.html, and
+//                                           never fires playerReady). The dep is now pinned to
+//                                           an EXACT 2.3.0 for this reason. See REVIVAL_LOG #23.
 
 export default function RootLayout() {
   // The app is portrait everywhere. app.json's orientation is now "default"
