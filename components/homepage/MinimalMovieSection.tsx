@@ -8,7 +8,7 @@ import { Image } from 'expo-image';
 interface MinimalMovieSectionProps {
   title: string;
   movies: Movie[];
-  icon?: string;
+  icon?: React.ComponentProps<typeof FontAwesome>["name"];
   accent?: string;
 }
 
@@ -243,4 +243,4 @@ const styles = StyleSheet.create({
   }
 });
 
-export default memo(MinimalMovieSection); 
+export default memo(MinimalMovieSection);

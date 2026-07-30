@@ -6,145 +6,605 @@
  */
 
 import React from 'react';
-import { View, Text, TouchableOpacity, Image, Dimensions, ScrollView, Alert, Animated } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  FlatList,
+  Platform,
+  StyleSheet,
+  type StyleProp,
+  type ViewStyle,
+  type GestureResponderEvent,
+} from 'react-native';
+// expo-image, not RN's Image: the rails need `cachePolicy="memory-disk"` so leaving
+// the tab and coming back doesn't re-download the whole gallery, plus recyclingKey
+// so FlatList can reuse card views without flashing the previous movie's art.
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { fetchMovieVideos, TMDB_CONFIG } from '../../services/api';
-import { useState, useEffect, useRef } from 'react';
-import TrailerPlayer from '../TrailerPlayer';
-import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
+import { fetchMovieVideos, fetchMovieImages } from '../../services/api';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import MovieDetailsTab from './MovieDetailsTab';
+import MovieCastTab from './MovieCastTab';
+import MovieSimilarTab from './MovieSimilarTab';
+import { type ArtworkSource } from './ArtworkViewer';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { MotiView } from 'moti';
 import type {
   MovieTabBarProps,
   TabType,
-  Quality,
-  CollapsibleSectionProps,
   MovieVideo
 } from '../../interfaces/interfaces';
 
+// Shared rhythm under the tab strip — every tab starts and spaces the same way.
+const TAB_CONTENT_TOP = 16;
+const TAB_SECTION_GAP = 24;
+const SECTION_TITLE_GAP = 12;
+
+// Downloading + sharing moved into ArtworkViewer along with the tap target. Tapping a
+// card used to go STRAIGHT to the OS share sheet, which meant there was no way to
+// actually look at the artwork, and saving it took two taps. Now the card expands and
+// owns both actions, one tap each.
+
 /**
- * NoContentPlaceholder Component
- * Displays a standardized placeholder when content is unavailable
- * @param message - The message to display in the placeholder
+ * NOTE: These sections live at MODULE scope on purpose. When they were declared
+ * inside MovieTabBar's body, every parent re-render minted a brand-new component
+ * type, so React unmounted + remounted each section — loading state reset, the
+ * fetch effects re-ran, and the whole Extras tab flickered uncontrollably.
  */
-const NoContentPlaceholder = ({ message }: { message: string }) => (
-  <View style={{
-    alignItems: 'center',
-    padding: 16,
-    gap: 12,
-  }}>
-    <View style={{
-      backgroundColor: 'rgba(156, 202, 223, 0.1)',
-      padding: 10,
-      borderRadius: 10,
-      borderWidth: 1,
-      borderColor: 'rgba(156, 202, 223, 0.15)',
-    }}>
-      <Ionicons 
-        name="information-circle-outline" 
-        size={24} 
-        color="rgba(156, 202, 223, 0.6)" 
-      />
+
+// ── Extras rails ────────────────────────────────────────────────────────────
+// All three rails are virtualized and paged.
+//
+// Paging here buys NO API calls: /movie/{id}/images returns every file path in a
+// single response, so the full list is already in memory and cached — "load more"
+// is a setState, never a request. It exists to bound how many full-size images we
+// pull over the network. A big release carries ~200 textless backdrops (Supergirl:
+// 197 backdrops + 38 posters ≈ 22 MB) and the old plain ScrollView mounted every
+// card the moment the tab opened, firing all of that in one burst.
+//
+// FlatList does the real work — only cards near the viewport mount, so downloads
+// follow the swipe. RAIL_PAGE caps the worst case on top of that.
+const RAIL_PAGE = 12;
+const RAIL_GAP = 12;       // must match extrasStyles.rail's `gap` — getItemLayout depends on it
+const WIDE_CARD_W = 280;   // trailers + backdrops
+const WIDE_CARD_H = 160;
+const POSTER_CARD_W = 120;
+const POSTER_CARD_H = 180;
+
+// The floating viewer expands with a UNIFORM scale, so its card must share the rail
+// card's aspect exactly — otherwise the image visibly stretches on the way out and back.
+const WIDE_ASPECT = WIDE_CARD_W / WIDE_CARD_H;
+const POSTER_ASPECT = POSTER_CARD_W / POSTER_CARD_H;
+
+// Shared FlatList tuning: small batches keep the JS thread free while swiping, and
+// removeClippedSubviews lets RN detach off-screen cards from the native view tree.
+const railProps = {
+  horizontal: true as const,
+  showsHorizontalScrollIndicator: false,
+  initialNumToRender: 4,
+  maxToRenderPerBatch: 4,
+  windowSize: 3,
+  // Android only. On iOS this detaches card views from the native hierarchy for little
+  // benefit, and detached views break anything that needs to read their geometry — it
+  // is what silently killed the first version of the artwork tap. Virtualization
+  // (windowSize / maxToRenderPerBatch) already does the real work on both platforms.
+  removeClippedSubviews: Platform.OS === 'android',
+};
+
+// Card widths are fixed, so hand FlatList the geometry instead of making it measure
+// every card — no per-card layout pass, and no scroll jitter as views recycle.
+const railLayout = (cardWidth: number) => (_data: unknown, index: number) => ({
+  length: cardWidth + RAIL_GAP,
+  offset: (cardWidth + RAIL_GAP) * index,
+  index,
+});
+
+/**
+ * Reveals RAIL_PAGE items at a time from a list that is ALREADY in memory. Resets
+ * when the source list changes, so switching movies never inherits the previous
+ * movie's expanded state.
+ */
+const usePagedRail = <T,>(items: T[]) => {
+  const [shown, setShown] = useState(RAIL_PAGE);
+  useEffect(() => setShown(RAIL_PAGE), [items]);
+  const visible = useMemo(() => items.slice(0, shown), [items, shown]);
+  const loadMore = useCallback(() => setShown((n) => n + RAIL_PAGE), []);
+  return { visible, loadMore, remaining: Math.max(0, items.length - shown) };
+};
+
+/**
+ * A rail card that reports its on-screen rect when tapped, so the viewer can expand
+ * FROM it and collapse back TO it — even after the rail has been scrolled.
+ *
+ * The rect is derived from the TOUCH, not from measureInWindow. `pageX/pageY` is the
+ * touch in window coordinates and `locationX/locationY` is that same point relative to
+ * this card, so the difference is the card's top-left corner. Width and height are the
+ * constants that also drive the card styles, so the rect is exact.
+ *
+ * The first version used `measureInWindow` and did nothing when it returned zeros. It
+ * returned zeros constantly: FlatList's removeClippedSubviews detaches card views from
+ * the native hierarchy, and a detached view measures as 0×0. The guard then swallowed
+ * every tap — no error, no viewer, no clue. This way is synchronous, has no failure
+ * mode, and cannot silently drop a tap.
+ *
+ * The press target exactly covers the card, which is what keeps locationX/locationY
+ * card-relative rather than relative to some inner image.
+ */
+const RailCard = ({
+  style,
+  cardWidth,
+  cardHeight,
+  onExpand,
+  children,
+}: {
+  style: StyleProp<ViewStyle>;
+  cardWidth: number;
+  cardHeight: number;
+  onExpand: (origin: { x: number; y: number; width: number; height: number }) => void;
+  children: React.ReactNode;
+}) => {
+  const handlePress = useCallback(
+    (e: GestureResponderEvent) => {
+      const { pageX, pageY, locationX, locationY } = e.nativeEvent;
+      onExpand({
+        x: pageX - locationX,
+        y: pageY - locationY,
+        width: cardWidth,
+        height: cardHeight,
+      });
+    },
+    [cardWidth, cardHeight, onExpand]
+  );
+
+  // Structure is deliberately identical to the trailers rail (a sized View wrapping an
+  // absoluteFill TouchableOpacity). The touch target exactly covers the card either
+  // way, so locationX/locationY stay card-relative — but this is the markup that is
+  // known to lay out correctly inside a horizontal FlatList here, and swapping it for a
+  // bare Pressable is not worth the risk for a press-opacity nicety.
+  return (
+    <View style={style}>
+      <TouchableOpacity onPress={handlePress} activeOpacity={0.85} style={StyleSheet.absoluteFill}>
+        {children}
+      </TouchableOpacity>
     </View>
-    <Text style={{
-      color: 'rgba(255,255,255,0.5)',
-      fontSize: 14,
-      textAlign: 'center',
-      fontStyle: 'italic',
-    }}>
-      {message}
-    </Text>
-  </View>
+  );
+};
+
+/** Tail tile that reveals the next page. Icon AND label — never an icon alone. */
+const LoadMoreCard = ({
+  remaining,
+  onPress,
+  style,
+}: {
+  remaining: number;
+  onPress: () => void;
+  style: StyleProp<ViewStyle>;
+}) => (
+  <TouchableOpacity
+    onPress={onPress}
+    style={[style, extrasStyles.loadMoreCard]}
+    accessibilityRole="button"
+    accessibilityLabel={`Load ${remaining} more`}
+  >
+    <Ionicons name="add-circle-outline" size={24} color="rgba(255,255,255,0.75)" />
+    <Text style={extrasStyles.loadMoreLabel}>Load more</Text>
+    <Text style={extrasStyles.loadMoreCount}>{remaining} left</Text>
+  </TouchableOpacity>
 );
 
 /**
- * CollapsibleSection Component
- * A reusable component that can show/hide content with a preview mode
- * @param title - Section title
- * @param children - Full content to display when expanded
- * @param previewContent - Preview content to show when collapsed
- * @param itemCount - Number of items in the section
- * @param hasContent - Whether the section has any content
+ * YouTube only guarantees hqdefault — maxresdefault 404s on older and unofficial
+ * uploads. Start high (it's the only true 16:9 size; hqdefault is 4:3 letterboxed
+ * and would show black bars in a 280×160 card) and step down once if it's missing.
  */
-const CollapsibleSection = ({ title, children, previewContent, itemCount, hasContent }: CollapsibleSectionProps) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const hasMultipleItems = itemCount > 1;
+const TrailerThumb = ({ videoKey }: { videoKey: string }) => {
+  const [fallback, setFallback] = useState(false);
+  return (
+    <Image
+      source={{
+        uri: `https://img.youtube.com/vi/${videoKey}/${fallback ? 'hqdefault' : 'maxresdefault'}.jpg`,
+      }}
+      style={extrasStyles.cardImage}
+      contentFit="cover"
+      transition={150}
+      cachePolicy="memory-disk"
+      recyclingKey={videoKey}
+      onError={() => setFallback(true)}
+    />
+  );
+};
 
-  if (!hasContent) {
+/**
+ * TrailersSection Component
+ * Fetches and displays movie trailers with YouTube thumbnails
+ */
+const TrailersSection = ({
+  movieId,
+  onTrailerSelect,
+}: { movieId: string; onTrailerSelect: (videoKey: string) => void }) => {
+  const [videos, setVideos] = useState<MovieVideo[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch trailers on component mount.
+  // `cancelled` is defensive rather than a fix for an observed bug: today the detail
+  // layer is keyed by movie id, so this remounts per movie and `movieId` never changes
+  // under a request in flight. The guard keeps that true if the keying ever changes,
+  // and stops a response landing after the sheet is dismissed.
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadVideos = async () => {
+      try {
+        const fetchedVideos = await fetchMovieVideos(movieId);
+        if (!cancelled) setVideos(fetchedVideos);
+      } catch (error) {
+        console.error('Error loading videos:', error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    loadVideos();
+    return () => {
+      cancelled = true;
+    };
+  }, [movieId]);
+
+  // Above the early returns — hook order has to be identical on every render.
+  const { visible, loadMore, remaining } = usePagedRail(videos);
+
+  if (loading) {
     return (
-      <View style={{
-        backgroundColor: 'rgba(156, 202, 223, 0.05)',
-        borderRadius: 16,
-        marginBottom: 16,
-        overflow: 'hidden',
-      }}>
-        <View style={{
-          padding: 16,
-          paddingBottom: 8,
-          borderBottomWidth: 1,
-          borderBottomColor: 'rgba(255,255,255,0.1)',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.9)',
-            fontSize: 15,
-            fontWeight: '600',
-          }}>
-            {title}
-          </Text>
-        </View>
-        <NoContentPlaceholder message={`${title} unavailable`} />
+      <View style={extrasStyles.stateBox}>
+        <Text style={extrasStyles.stateText}>Loading trailers...</Text>
+      </View>
+    );
+  }
+
+  if (videos.length === 0) {
+    return (
+      <View style={extrasStyles.stateBox}>
+        <Text style={extrasStyles.stateText}>No trailers available</Text>
       </View>
     );
   }
 
   return (
-    <View style={{
-      backgroundColor: 'rgba(156, 202, 223, 0.05)',
-      borderRadius: 16,
-      marginBottom: 16,
-      overflow: 'hidden',
-    }}>
-      <TouchableOpacity
-        onPress={() => hasMultipleItems && setIsExpanded(!isExpanded)}
-        disabled={!hasMultipleItems}
-        style={{
-          padding: 16,
-          paddingBottom: 8,
-          borderBottomWidth: 1,
-          borderBottomColor: 'rgba(255,255,255,0.1)',
-        }}
-      >
-        <View style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.9)',
-            fontSize: 15,
-            fontWeight: '600',
-          }}>
-            {title}
-          </Text>
-          {hasMultipleItems && (
-            <Ionicons
-              name={isExpanded ? "chevron-up" : "chevron-down"}
-              size={20}
-              color="#9ccadf"
-            />
-          )}
-        </View>
-      </TouchableOpacity>
-
-      <View style={{
-        padding: 16,
-      }}>
-        {hasMultipleItems ? (isExpanded ? children : previewContent) : children}
-      </View>
-    </View>
+    <FlatList
+      {...railProps}
+      data={visible}
+      keyExtractor={(item) => item.id}
+      getItemLayout={railLayout(WIDE_CARD_W)}
+      contentContainerStyle={extrasStyles.rail}
+      ListFooterComponent={
+        remaining > 0 ? (
+          <LoadMoreCard remaining={remaining} onPress={loadMore} style={extrasStyles.wideCard} />
+        ) : null
+      }
+      renderItem={({ item: video }) => (
+        <TouchableOpacity onPress={() => onTrailerSelect(video.key)} style={extrasStyles.wideCard}>
+          <TrailerThumb videoKey={video.key} />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.8)']}
+            style={extrasStyles.trailerScrim}
+          >
+            <Text style={extrasStyles.trailerName}>{video.name}</Text>
+            <Text style={extrasStyles.trailerMeta}>
+              {video.type} • {new Date(video.published_at).toLocaleDateString()}
+            </Text>
+          </LinearGradient>
+        </TouchableOpacity>
+      )}
+    />
   );
 };
+
+/**
+ * BackdropsSection Component
+ * Displays movie backdrop images — tap shares the full-res image directly.
+ */
+const BackdropsSection = ({
+  movieId,
+  onExpand,
+}: {
+  movieId: string;
+  onExpand: (item: ArtworkSource) => void;
+}) => {
+  const [backdrops, setBackdrops] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false; // see the note on TrailersSection's effect
+
+    const loadBackdrops = async () => {
+      try {
+        // Shared artwork call — the hero and the detail backdrop already made it for
+        // this movie, so opening Extras hits the 30-minute cache instead of the network.
+        const { backdrops: textless } = await fetchMovieImages(movieId);
+        if (!cancelled) setBackdrops(textless);
+      } catch (error) {
+        console.error('Error loading backdrops:', error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    loadBackdrops();
+    return () => {
+      cancelled = true;
+    };
+  }, [movieId]);
+
+  // Above the early returns — hook order has to be identical on every render.
+  const { visible, loadMore, remaining } = usePagedRail(backdrops);
+
+  if (loading) {
+    return (
+      <View style={extrasStyles.stateBox}>
+        <Text style={extrasStyles.stateText}>Loading backdrops...</Text>
+      </View>
+    );
+  }
+
+  if (backdrops.length === 0) {
+    return (
+      <View style={extrasStyles.stateBox}>
+        <Text style={extrasStyles.stateText}>No backdrops available</Text>
+      </View>
+    );
+  }
+
+  return (
+    <FlatList
+      {...railProps}
+      data={visible}
+      keyExtractor={(item) => item}
+      getItemLayout={railLayout(WIDE_CARD_W)}
+      contentContainerStyle={extrasStyles.rail}
+      ListFooterComponent={
+        remaining > 0 ? (
+          <LoadMoreCard remaining={remaining} onPress={loadMore} style={extrasStyles.wideCard} />
+        ) : null
+      }
+      renderItem={({ item: backdrop }) => (
+        <RailCard
+          style={extrasStyles.wideCard}
+          cardWidth={WIDE_CARD_W}
+          cardHeight={WIDE_CARD_H}
+          onExpand={(origin) =>
+            onExpand({
+              // w1280 for viewing: big enough to actually study on a phone, far short
+              // of `original`, which runs several MB. Original is fetched only if the
+              // user downloads or shares.
+              viewUri: `https://image.tmdb.org/t/p/w1280${backdrop}`,
+              originalUri: `https://image.tmdb.org/t/p/original${backdrop}`,
+              aspect: WIDE_ASPECT,
+              fileName: 'backdrop_image.jpg',
+              label: 'Backdrop',
+              origin,
+            })
+          }
+        >
+          {/* w780 is deliberate, not lazy: the card is 280pt wide, which is 840px on
+              a 3× screen. Anything smaller would visibly soften. */}
+          <Image
+            source={{ uri: `https://image.tmdb.org/t/p/w780${backdrop}` }}
+            style={extrasStyles.cardImage}
+            contentFit="cover"
+            transition={150}
+            cachePolicy="memory-disk"
+            recyclingKey={backdrop}
+          />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.3)']}
+            style={extrasStyles.hintScrim}
+          >
+            <Text style={extrasStyles.hintText}>View</Text>
+          </LinearGradient>
+        </RailCard>
+      )}
+    />
+  );
+};
+
+/**
+ * PostersSection Component
+ * Displays movie poster images — tap shares the full-res image directly.
+ */
+const PostersSection = ({
+  movieId,
+  onExpand,
+}: {
+  movieId: string;
+  onExpand: (item: ArtworkSource) => void;
+}) => {
+  const [posters, setPosters] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false; // see the note on TrailersSection's effect
+
+    const loadPosters = async () => {
+      try {
+        // Same shared, cached call as the hero — so the gallery leads with the same
+        // well-vetted art the cover uses instead of TMDB's raw single-vote-first order.
+        const { posters: textless } = await fetchMovieImages(movieId);
+        if (!cancelled) setPosters(textless);
+      } catch (error) {
+        console.error('Error loading posters:', error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    loadPosters();
+    return () => {
+      cancelled = true;
+    };
+  }, [movieId]);
+
+  // Above the early returns — hook order has to be identical on every render.
+  const { visible, loadMore, remaining } = usePagedRail(posters);
+
+  if (loading) {
+    return (
+      <View style={extrasStyles.stateBox}>
+        <Text style={extrasStyles.stateText}>Loading posters...</Text>
+      </View>
+    );
+  }
+
+  if (posters.length === 0) {
+    return (
+      <View style={extrasStyles.stateBox}>
+        <Text style={extrasStyles.stateText}>No posters available</Text>
+      </View>
+    );
+  }
+
+  return (
+    <FlatList
+      {...railProps}
+      data={visible}
+      keyExtractor={(item) => item}
+      getItemLayout={railLayout(POSTER_CARD_W)}
+      contentContainerStyle={extrasStyles.rail}
+      ListFooterComponent={
+        remaining > 0 ? (
+          <LoadMoreCard remaining={remaining} onPress={loadMore} style={extrasStyles.posterCard} />
+        ) : null
+      }
+      renderItem={({ item: poster }) => (
+        <RailCard
+          style={extrasStyles.posterCard}
+          cardWidth={POSTER_CARD_W}
+          cardHeight={POSTER_CARD_H}
+          onExpand={(origin) =>
+            onExpand({
+              viewUri: `https://image.tmdb.org/t/p/w780${poster}`,
+              originalUri: `https://image.tmdb.org/t/p/original${poster}`,
+              aspect: POSTER_ASPECT,
+              fileName: 'poster_image.jpg',
+              label: 'Poster',
+              origin,
+            })
+          }
+        >
+          {/* w342 ≈ the 120pt card at 3× — right-sized, not downscaled waste. */}
+          <Image
+            source={{ uri: `https://image.tmdb.org/t/p/w342${poster}` }}
+            style={extrasStyles.cardImage}
+            contentFit="cover"
+            transition={150}
+            cachePolicy="memory-disk"
+            recyclingKey={poster}
+          />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.3)']}
+            style={extrasStyles.hintScrim}
+          >
+            <Text style={extrasStyles.hintText}>View</Text>
+          </LinearGradient>
+        </RailCard>
+      )}
+    />
+  );
+};
+
+// Shared look for the three extras rails — one definition instead of three
+// copies of the same inline objects.
+const extrasStyles = StyleSheet.create({
+  stateBox: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    height: 180,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stateText: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
+  },
+  rail: {
+    gap: 12,
+    paddingRight: 20,
+  },
+  wideCard: {
+    // Shared with railLayout AND with WIDE_ASPECT (the viewer's expand geometry) —
+    // one value, never three.
+    width: WIDE_CARD_W,
+    height: WIDE_CARD_H,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  posterCard: {
+    // Shared with railLayout AND with POSTER_ASPECT — one value, never three.
+    width: POSTER_CARD_W,
+    height: POSTER_CARD_H,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  // No resizeMode here — expo-image takes `contentFit` as a prop instead.
+  cardImage: {
+    width: '100%',
+    height: '100%',
+  },
+  loadMoreCard: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  loadMoreLabel: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  loadMoreCount: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 11,
+  },
+  trailerScrim: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    padding: 12,
+    height: '50%',
+  },
+  trailerName: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  trailerMeta: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  hintScrim: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  hintText: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+});
 
 /**
  * MovieTabBar Component
@@ -153,13 +613,12 @@ const CollapsibleSection = ({ title, children, previewContent, itemCount, hasCon
  * @param activeTab - Currently selected tab
  * @param setActiveTab - Function to change the active tab
  * @param movie - Movie data object
- * @param onTrailerSelect - Handler for when a trailer is selected
- * @param selectedVideo - Currently selected video ID
- * @param onCloseVideo - Handler for closing the video player
- * @param scrollViewRef - Reference to the main scroll view
+ * @param onTrailerSelect - Handler for when a trailer is selected (the detail
+ *        screen owns the single cinema player — no player renders here)
  */
 const MovieTabBar = ({
-  activeTab, setActiveTab, movie, onTrailerSelect, selectedVideo, onCloseVideo, scrollViewRef
+  activeTab, setActiveTab, movie, onTrailerSelect, onSimilarMovieSelect,
+  onExpandArtwork,
 }: MovieTabBarProps) => {
   // Available tabs configuration
   const tabs: { id: TabType; label: string }[] = [
@@ -169,1685 +628,128 @@ const MovieTabBar = ({
     { id: 'similar', label: 'Similar' },
   ];
 
-  // Video quality options for trailers
-  const qualities: Quality[] = [
-    { label: '1080p', value: 'hd1080' },
-    { label: '720p', value: 'hd720' },
-    { label: '480p', value: 'large' },
-    { label: '360p', value: 'medium' },
-  ];
-
-  /**
-   * TrailersSection Component
-   * Fetches and displays movie trailers with YouTube thumbnails
-   */
-  const TrailersSection = ({ movieId }: { movieId: string }) => {
-    const [videos, setVideos] = useState<MovieVideo[]>([]);
-    const [loading, setLoading] = useState(true);
-
-    // Fetch trailers on component mount
-    useEffect(() => {
-      const loadVideos = async () => {
-        try {
-          const fetchedVideos = await fetchMovieVideos(movieId);
-          setVideos(fetchedVideos);
-        } catch (error) {
-          console.error('Error loading videos:', error);
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      loadVideos();
-    }, [movieId]);
-
-    const handleTrailerPress = (videoKey: string) => {
-      onTrailerSelect(videoKey);
-    };
-
-    if (loading) {
-      return (
-        <View style={{
-          backgroundColor: 'rgba(255,255,255,0.05)',
-          height: 180,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.4)',
-            fontSize: 14,
-          }}>
-            Loading trailers...
-          </Text>
-        </View>
-      );
-    }
-
-    if (videos.length === 0) {
-      return (
-        <View style={{
-          backgroundColor: 'rgba(255,255,255,0.05)',
-          height: 180,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.4)',
-            fontSize: 14,
-          }}>
-            No trailers available
-          </Text>
-        </View>
-      );
-    }
-
-    return (
-      <>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{
-            gap: 12,
-            paddingRight: 20,
-          }}
-        >
-          {videos.map((video) => (
-            <TouchableOpacity
-              key={video.id}
-              onPress={() => handleTrailerPress(video.key)}
-              style={{
-                width: 280,
-                height: 160,
-                borderRadius: 12,
-                overflow: 'hidden',
-                backgroundColor: 'rgba(255,255,255,0.05)',
-                borderWidth: 1,
-                borderColor: 'rgba(255,255,255,0.1)',
-              }}
-            >
-              <Image
-                source={{
-                  uri: `https://img.youtube.com/vi/${video.key}/maxresdefault.jpg`,
-                }}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  resizeMode: 'cover',
-                }}
-                defaultSource={{ uri: `https://img.youtube.com/vi/${video.key}/hqdefault.jpg` }}
-              />
-              <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.8)']}
-                style={{
-                  position: 'absolute',
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  padding: 12,
-                  height: '50%',
-                }}
-              >
-                <Text style={{
-                  color: 'white',
-                  fontSize: 14,
-                  fontWeight: '600',
-                }}>
-                  {video.name}
-                </Text>
-                <Text style={{
-                  color: 'rgba(255,255,255,0.6)',
-                  fontSize: 12,
-                  marginTop: 4,
-                }}>
-                  {video.type} • {new Date(video.published_at).toLocaleDateString()}
-                </Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </>
-    );
-  };
-
-  /**
-   * BackdropsSection Component
-   * Displays movie backdrop images with sharing capabilities
-   */
-  const BackdropsSection = ({ movieId }: { movieId: string }) => {
-    const [backdrops, setBackdrops] = useState<string[]>([]);
-    const [loading, setLoading] = useState(true);
-
-    /**
-     * Handles sharing of backdrop images
-     * Shows options dialog and handles the sharing process
-     */
-    const handleSaveImage = async (imageUrl: string) => {
-      try {
-        Alert.alert(
-          'Image Options',
-          'What would you like to do with this image?',
-          [
-            {
-              text: 'Cancel',
-              style: 'cancel'
-            },
-            {
-              text: 'Options',
-              onPress: async () => {
-                try {
-                  const isAvailable = await Sharing.isAvailableAsync();
-                  
-                  if (isAvailable) {
-                    // Download image directly to cache
-                    const downloadResult = await FileSystem.downloadAsync(
-                      imageUrl,
-                      FileSystem.cacheDirectory + 'backdrop_image.jpg'
-                    );
-
-                    // Share the downloaded file
-                    await Sharing.shareAsync(downloadResult.uri, {
-                      mimeType: 'image/jpeg',
-                      dialogTitle: 'Share Movie Backdrop'
-                    });
-
-                    // Clean up
-                    await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true });
-                  } else {
-                    Alert.alert('Error', 'Sharing is not available on this device');
-                  }
-                } catch (error) {
-                  console.error('Error sharing image:', error);
-                  Alert.alert('Error', 'Failed to share image');
-                }
-              }
-            }
-          ]
-        );
-      } catch (error) {
-        console.error('Error handling image share:', error);
-        Alert.alert('Error', 'Failed to share image');
-      }
-    };
-
-    useEffect(() => {
-      const loadBackdrops = async () => {
-        try {
-          const response = await fetch(
-            `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images`,
-            {
-              method: 'GET',
-              headers: TMDB_CONFIG.headers,
-            }
-          );
-          const data = await response.json();
-          const cleanBackdrops = (data.backdrops || [])
-            .filter((backdrop: any) => !backdrop.iso_639_1)
-            .map((backdrop: any) => backdrop.file_path);
-          setBackdrops(cleanBackdrops);
-        } catch (error) {
-          console.error('Error loading backdrops:', error);
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      loadBackdrops();
-    }, [movieId]);
-
-    if (loading) {
-      return (
-        <View style={{
-          backgroundColor: 'rgba(255,255,255,0.05)',
-          height: 180,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.4)',
-            fontSize: 14,
-          }}>
-            Loading backdrops...
-          </Text>
-        </View>
-      );
-    }
-
-    if (backdrops.length === 0) {
-      return (
-        <View style={{
-          backgroundColor: 'rgba(255,255,255,0.05)',
-          height: 180,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.4)',
-            fontSize: 14,
-          }}>
-            No backdrops available
-          </Text>
-        </View>
-      );
-    }
-
-    return (
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{
-          gap: 12,
-          paddingRight: 20,
-        }}
-      >
-        {backdrops.map((backdrop, index) => {
-          const imageUrl = `https://image.tmdb.org/t/p/original${backdrop}`;
-          return (
-            <TouchableOpacity
-              key={`backdrop-${index}`}
-              onPress={() => handleSaveImage(imageUrl)}
-              style={{
-                width: 280,
-                height: 160,
-                borderRadius: 12,
-                overflow: 'hidden',
-                backgroundColor: 'rgba(255,255,255,0.05)',
-                borderWidth: 1,
-                borderColor: 'rgba(255,255,255,0.1)',
-              }}
-            >
-              <Image
-                source={{
-                  uri: `https://image.tmdb.org/t/p/w780${backdrop}`,
-                }}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  resizeMode: 'cover',
-                }}
-              />
-              {/* Add a subtle hint that the image is tappable */}
-              <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.3)']}
-                style={{
-                  position: 'absolute',
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  height: 40,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                <Text style={{
-                  color: 'rgba(255,255,255,0.8)',
-                  fontSize: 12,
-                  fontWeight: '500',
-                }}>
-                  Image options
-                </Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
-    );
-  };
-
-  /**
-   * PostersSection Component
-   * Displays movie poster images with sharing capabilities
-   */
-  const PostersSection = ({ movieId }: { movieId: string }) => {
-    const [posters, setPosters] = useState<string[]>([]);
-    const [loading, setLoading] = useState(true);
-
-    const handleSaveImage = async (imageUrl: string) => {
-      try {
-        Alert.alert(
-          'Image Options',
-          'What would you like to do with this image?',
-          [
-            {
-              text: 'Cancel',
-              style: 'cancel'
-            },
-            {
-              text: 'Options',
-              onPress: async () => {
-                try {
-                  const isAvailable = await Sharing.isAvailableAsync();
-                  
-                  if (isAvailable) {
-                    // Download image directly to cache
-                    const downloadResult = await FileSystem.downloadAsync(
-                      imageUrl,
-                      FileSystem.cacheDirectory + 'poster_image.jpg'
-                    );
-
-                    // Share the downloaded file
-                    await Sharing.shareAsync(downloadResult.uri, {
-                      mimeType: 'image/jpeg',
-                      dialogTitle: 'Share Movie Poster'
-                    });
-
-                    // Clean up
-                    await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true });
-                  } else {
-                    Alert.alert('Error', 'Sharing is not available on this device');
-                  }
-                } catch (error) {
-                  console.error('Error sharing image:', error);
-                  Alert.alert('Error', 'Failed to share image');
-                }
-              }
-            }
-          ]
-        );
-      } catch (error) {
-        console.error('Error handling image share:', error);
-        Alert.alert('Error', 'Failed to share image');
-      }
-    };
-
-    useEffect(() => {
-      const loadPosters = async () => {
-        try {
-          const response = await fetch(
-            `${TMDB_CONFIG.BASE_URL}/movie/${movieId}/images`,
-            {
-              method: 'GET',
-              headers: TMDB_CONFIG.headers,
-            }
-          );
-          const data = await response.json();
-          const cleanPosters = (data.posters || [])
-            .filter((poster: any) => !poster.iso_639_1)
-            .map((poster: any) => poster.file_path);
-          setPosters(cleanPosters);
-        } catch (error) {
-          console.error('Error loading posters:', error);
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      loadPosters();
-    }, [movieId]);
-
-    if (loading) {
-      return (
-        <View style={{
-          backgroundColor: 'rgba(255,255,255,0.05)',
-          height: 180,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.4)',
-            fontSize: 14,
-          }}>
-            Loading posters...
-          </Text>
-        </View>
-      );
-    }
-
-    if (posters.length === 0) {
-      return (
-        <View style={{
-          backgroundColor: 'rgba(255,255,255,0.05)',
-          height: 180,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}>
-          <Text style={{
-            color: 'rgba(255,255,255,0.4)',
-            fontSize: 14,
-          }}>
-            No posters available
-          </Text>
-        </View>
-      );
-    }
-
-    return (
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{
-          gap: 12,
-          paddingRight: 20,
-        }}
-      >
-        {posters.map((poster, index) => {
-          const imageUrl = `https://image.tmdb.org/t/p/original${poster}`;
-          return (
-            <TouchableOpacity
-              key={`poster-${index}`}
-              onPress={() => handleSaveImage(imageUrl)}
-              style={{
-                width: 120,
-                height: 180,
-                borderRadius: 12,
-                overflow: 'hidden',
-                backgroundColor: 'rgba(255,255,255,0.05)',
-                borderWidth: 1,
-                borderColor: 'rgba(255,255,255,0.1)',
-              }}
-            >
-              <Image
-                source={{
-                  uri: `https://image.tmdb.org/t/p/w342${poster}`,
-                }}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  resizeMode: 'cover',
-                }}
-              />
-              {/* Add a subtle hint that the image is tappable */}
-              <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.3)']}
-                style={{
-                  position: 'absolute',
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  height: 40,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                <Text style={{
-                  color: 'rgba(255,255,255,0.8)',
-                  fontSize: 12,
-                  fontWeight: '500',
-                }}>
-                  Image options
-                </Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
-    );
-  };
-
-  /**
-   * ScrollToTopButton Component
-   * Provides a button to scroll back to the top of the content
-   */
-  const ScrollToTopButton = () => (
-    <TouchableOpacity
-      onPress={() => {
-        scrollViewRef?.current?.scrollTo({
-          y: Dimensions.get('window').height * 0.3,
-          animated: true
-        });
-      }}
-      style={{
-        alignSelf: 'center',
-        marginTop: 40,
-        marginBottom: 20,
-        backgroundColor: 'rgba(156, 202, 223, 0.1)',
-        paddingHorizontal: 20,
-        paddingVertical: 12,
-        borderRadius: 25,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-        borderWidth: 1,
-        borderColor: 'rgba(156, 202, 223, 0.2)',
-      }}
-    >
-      <Ionicons 
-        name="chevron-up" 
-        size={18} 
-        color="#9ccadf" 
-      />
-      <Text style={{
-        color: '#9ccadf',
-        fontSize: 14,
-        fontWeight: '600',
-        letterSpacing: 0.5,
-      }}>
-        Back to Tabs
-      </Text>
-    </TouchableOpacity>
-  );
-
-  // Card flip animation state and refs
-  const [isFlipped, setIsFlipped] = useState(false);
-  const flipAnimation = useRef(new Animated.Value(0)).current;
-
-  /**
-   * Animation functions for card flip effect
-   */
-  const flipToBack = () => {
-    Animated.spring(flipAnimation, {
-      toValue: 180,
-      friction: 8,
-      tension: 10,
-      useNativeDriver: true,
-    }).start();
-    setIsFlipped(true);
-  };
-
-  const flipToFront = () => {
-    Animated.spring(flipAnimation, {
-      toValue: 0,
-      friction: 8,
-      tension: 10,
-      useNativeDriver: true,
-    }).start();
-    setIsFlipped(false);
-  };
-
-  // Animation interpolation for 3D card flip effect
-  const frontInterpolate = flipAnimation.interpolate({
-    inputRange: [0, 180],
-    outputRange: ['0deg', '180deg'],
-  });
-
-  const backInterpolate = flipAnimation.interpolate({
-    inputRange: [0, 180],
-    outputRange: ['180deg', '360deg'],
-  });
-
-  const frontAnimatedStyle = {
-    transform: [{ rotateY: frontInterpolate }]
-  };
-
-  const backAnimatedStyle = {
-    transform: [{ rotateY: backInterpolate }]
-  };
+  // The viewer itself is NOT rendered here. MovieTabBar sits deep inside the detail
+  // page's ScrollView, so a full-screen overlay mounted at this depth would be clipped
+  // by the scroll container. Both galleries just hand the tapped artwork upward and
+  // MovieDetailsView renders the single viewer at its root.
 
   return (
-    <View style={{ marginTop: 20 }}>
-      {/* Video Player Component */}
-      <TrailerPlayer
-        videoId={selectedVideo}
-        onClose={onCloseVideo}
-        rating={movie.certification}
-      />
-
+    // Vertical rhythm is owned here: identical top inset + section gap for every tab.
+    <View>
       {/* Tab Navigation Bar */}
-      <View style={{ 
-        paddingHorizontal: 20,
-      }}>
-        {/* Tab Buttons */}
-        <View style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 1,
-          width: '100%',
-        }}>
+      <View style={tabStyles.tabBar}>
+        <View style={tabStyles.tabRow}>
           {tabs.map((tab) => (
+            // activeOpacity={1} is REQUIRED, not a preference. Left at the default (0.2)
+            // the whole tab dims on press and then animates back — and because the press
+            // swaps the tab's entire content (a cast grid, a poster rail), that restore
+            // gets starved and the tab sits there translucent instead of going blue.
             <TouchableOpacity
               key={tab.id}
               onPress={() => setActiveTab(tab.id)}
-              style={{
-                paddingVertical: 12,
-              }}
+              style={tabStyles.tabHit}
+              activeOpacity={1}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: activeTab === tab.id }}
             >
-              {/* Tab Label with Active Indicator */}
-              <Text style={{
-                color: activeTab === tab.id ? '#9ccadf' : 'rgba(255,255,255,0.6)',
-                fontSize: 16,
-                fontWeight: activeTab === tab.id ? '700' : '500',
-                letterSpacing: 0.3,
-              }}>
+              <Text style={[
+                tabStyles.tabLabel,
+                activeTab === tab.id && tabStyles.tabLabelActive,
+              ]}>
                 {tab.label}
               </Text>
-              {/* Active Tab Indicator Line */}
-              {activeTab === tab.id && (
-                <View style={{
-                  position: 'absolute',
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  height: 2.5,
-                  backgroundColor: '#9ccadf',
-                  borderRadius: 1.25,
-                }} />
-              )}
+              {activeTab === tab.id && <View style={tabStyles.tabIndicator} />}
             </TouchableOpacity>
           ))}
         </View>
-        
-        {/* Tab Bar Bottom Border */}
-        <View style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: 1,
-          backgroundColor: 'rgba(255,255,255,0.1)',
-          marginHorizontal: 20,
-        }} />
+        <View style={tabStyles.tabRule} />
       </View>
 
-      {/* Tab Content Container */}
-      <View style={{
-        paddingTop: 20,
-        paddingHorizontal: 20,
-        minHeight: 200,
-      }}>
-        {/* Details Tab */}
-        {activeTab === 'details' && (
-          <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-            <View style={{ gap: 20, paddingBottom: 20 }}>
-              {/* Movie Info Card with Flip Animation */}
-              <View style={{
-                backgroundColor: 'transparent',
-                borderRadius: 16,
-                marginBottom: 16,
-              }}>
-                {/* Card Flip Touch Handler */}
-                <TouchableOpacity
-                  onPress={() => isFlipped ? flipToFront() : flipToBack()}
-                  activeOpacity={0.9}
-                >
-                  {/* Front Side of Card */}
-                  <Animated.View style={[
-                    {
-                      backfaceVisibility: 'hidden',
-                      backgroundColor: 'rgba(156, 202, 223, 0.05)',
-                      borderRadius: 16,
-                    },
-                    frontAnimatedStyle
-                  ]}>
-                    {/* Movie Details Content */}
-                    <View>
-                      {/* Release Date and Status */}
-                      <View style={{
-                        padding: 20,
-                        alignItems: 'center',
-                        gap: 12,
-                        borderBottomWidth: 1,
-                        borderBottomColor: 'rgba(255,255,255,0.1)',
-                      }}>
-                        <Text style={{
-                          color: '#9ccadf',
-                          fontSize: 18,
-                          fontWeight: '600',
-                          letterSpacing: 0.5,
-                        }}>
-                          {new Date(movie.release_date).toLocaleDateString('en-US', {
-                            year: 'numeric',
-                            month: 'long',
-                            day: 'numeric',
-                          })}
-                        </Text>
-                        <View style={{
-                          backgroundColor: 'rgba(156, 202, 223, 0.15)',
-                          paddingHorizontal: 12,
-                          paddingVertical: 4,
-                          borderRadius: 6,
-                          borderWidth: 1,
-                          borderColor: 'rgba(156, 202, 223, 0.2)',
-                        }}>
-                          <Text style={{
-                            color: '#9ccadf',
-                            fontSize: 12,
-                            fontWeight: '600',
-                            textTransform: 'uppercase',
-                            letterSpacing: 1,
-                          }}>
-                            {movie.status}
-                          </Text>
-                        </View>
-                      </View>
+      {/* Tab Content — same top pad for Details / Cast / Extras / Similar */}
+      <View style={tabStyles.content}>
+        {activeTab === 'details' && <MovieDetailsTab movie={movie} />}
 
-                      {/* Rating, Runtime, Language */}
-                      <View style={{
-                        flexDirection: 'row',
-                        justifyContent: 'space-between',
-                        padding: 20,
-                        paddingTop: 16,
-                        borderBottomWidth: 1,
-                        borderBottomColor: 'rgba(255,255,255,0.1)',
-                      }}>
-                        <View style={{ alignItems: 'center', flex: 1 }}>
-                          <Text style={{ 
-                            color: 'rgba(255,255,255,0.6)', 
-                            fontSize: 13, 
-                            marginBottom: 6 
-                          }}>
-                            Rating
-                          </Text>
-                          <Text style={{ 
-                            color: movie.certification === 'R' ? '#ef4444' : '#9ccadf', 
-                            fontSize: 18, 
-                            fontWeight: '600' 
-                          }}>
-                            {movie.certification}
-                          </Text>
-                        </View>
+        {activeTab === 'cast' && <MovieCastTab movie={movie} />}
 
-                        <View style={{ alignItems: 'center', flex: 1 }}>
-                          <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, marginBottom: 6 }}>
-                            Runtime
-                          </Text>
-                          <Text style={{ color: 'rgba(255,255,255,0.9)', fontSize: 18, fontWeight: '600' }}>
-                            {movie.formattedRuntime}
-                          </Text>
-                        </View>
-
-                        <View style={{ alignItems: 'center', flex: 1 }}>
-                          <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, marginBottom: 6 }}>
-                            Language
-                          </Text>
-                          <Text style={{ color: 'rgba(255,255,255,0.9)', fontSize: 18, fontWeight: '600' }}>
-                            {movie.spoken_languages.find(lang => 
-                              lang.iso_639_1 === movie.original_language
-                            )?.english_name || movie.original_language.toUpperCase()}
-                          </Text>
-                        </View>
-                      </View>
-
-                      {/* Genres */}
-                      <View style={{
-                        padding: 20,
-                        paddingTop: 16,
-                        borderBottomWidth: 1,
-                        borderBottomColor: 'rgba(255,255,255,0.1)',
-                      }}>
-                        {(() => {
-                          // Format genre names
-                          const formatGenreName = (name: string) => {
-                            return name === "Science Fiction" ? "Sci-Fi" : name;
-                          };
-
-                          const genres = movie.genres.map(genre => ({
-                            ...genre,
-                            name: formatGenreName(genre.name)
-                          }));
-
-                          // Sort genres by text length
-                          const sortedGenres = [...genres].sort((a, b) => a.name.length - b.name.length);
-                          const genreCount = sortedGenres.length;
-
-                          // For 4 genres, separate the longest one
-                          if (genreCount === 4) {
-                            const longestGenre = sortedGenres.pop(); // Remove longest genre
-                            
-                            return (
-                              <View style={{ gap: 12 }}>
-                                {/* First row with 3 genres */}
-                                <View style={{
-                                  flexDirection: 'row',
-                                  justifyContent: 'center',
-                                  gap: 8,
-                                }}>
-                                  {sortedGenres.map((genre) => (
-                                    <View key={genre.id} style={{
-                                      backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                                      paddingHorizontal: 12,
-                                      paddingVertical: 6,
-                                      borderRadius: 16,
-                                      borderWidth: 1,
-                                      borderColor: 'rgba(156, 202, 223, 0.15)',
-                                    }}>
-                                      <Text style={{
-                                        color: '#9ccadf',
-                                        fontSize: 13,
-                                        fontWeight: '500',
-                                      }}>
-                                        {genre.name}
-                                      </Text>
-                                    </View>
-                                  ))}
-                                </View>
-                                
-                                {/* Second row with longest genre */}
-                                <View style={{
-                                  flexDirection: 'row',
-                                  justifyContent: 'center',
-                                }}>
-                                  <View key={longestGenre.id} style={{
-                                    backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                                    paddingHorizontal: 12,
-                                    paddingVertical: 6,
-                                    borderRadius: 16,
-                                    borderWidth: 1,
-                                    borderColor: 'rgba(156, 202, 223, 0.15)',
-                                  }}>
-                                    <Text style={{
-                                      color: '#9ccadf',
-                                      fontSize: 13,
-                                      fontWeight: '500',
-                                    }}>
-                                      {longestGenre.name}
-                                    </Text>
-                                  </View>
-                                </View>
-                              </View>
-                            );
-                          }
-
-                          // For all other counts (1, 2, 3, 5+)
-                          // Rearrange based on count
-                          if (genreCount === 2) {
-                            // Longest on right
-                            [sortedGenres[0], sortedGenres[1]] = [sortedGenres[1], sortedGenres[0]];
-                          } else if (genreCount === 3) {
-                            // Longest in middle
-                            const middle = sortedGenres.pop();
-                            sortedGenres.splice(1, 0, middle);
-                          }
-
-                          return (
-                            <View style={{
-                              flexDirection: 'row',
-                              justifyContent: genreCount === 1 ? 'center' : 'center',
-                              flexWrap: 'wrap',
-                              gap: 8,
-                            }}>
-                              {sortedGenres.map((genre) => (
-                                <View key={genre.id} style={{
-                                  backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                                  paddingHorizontal: 12,
-                                  paddingVertical: 6,
-                                  borderRadius: 16,
-                                  borderWidth: 1,
-                                  borderColor: 'rgba(156, 202, 223, 0.15)',
-                                }}>
-                                  <Text style={{
-                                    color: '#9ccadf',
-                                    fontSize: 13,
-                                    fontWeight: '500',
-                                  }}>
-                                    {genre.name}
-                                  </Text>
-                                </View>
-                              ))}
-                            </View>
-                          );
-                        })()}
-                      </View>
-
-                      {/* Financial Info */}
-                      <View style={{
-                        padding: 20,
-                        paddingTop: 16,
-                      }}>
-                        <View style={{
-                          flexDirection: 'row',
-                          justifyContent: 'space-between',
-                          alignItems: 'flex-start',
-                        }}>
-                          {/* Left Column */}
-                          <View style={{
-                            flex: 1,
-                            alignItems: 'center',
-                            paddingHorizontal: 8,
-                          }}>
-                            <Text style={{ 
-                              color: 'rgba(255,255,255,0.6)', 
-                              fontSize: 13,
-                              marginBottom: 8,
-                            }}>
-                              Budget
-                            </Text>
-                            <Text style={{ 
-                              color: 'rgba(255,255,255,0.9)', 
-                              fontSize: 16, 
-                              fontWeight: '700',
-                            }}>
-                              {movie.formattedBudget}
-                            </Text>
-                          </View>
-
-                          {/* Center Column */}
-                          <View style={{
-                            flex: 1,
-                            alignItems: 'center',
-                            paddingHorizontal: 8,
-                            borderLeftWidth: 1,
-                            borderRightWidth: 1,
-                            borderColor: 'rgba(255,255,255,0.08)',
-                          }}>
-                            <Text style={{ 
-                              color: 'rgba(255,255,255,0.6)', 
-                              fontSize: 13,
-                              marginBottom: 8,
-                            }}>
-                              Revenue
-                            </Text>
-                            <Text style={{ 
-                              color: '#9ccadf', 
-                              fontSize: 16, 
-                              fontWeight: '700',
-                            }}>
-                              {movie.formattedRevenue}
-                            </Text>
-                          </View>
-
-                          {/* Right Column */}
-                          <View style={{
-                            flex: 1,
-                            alignItems: 'center',
-                            paddingHorizontal: 8,
-                          }}>
-                            <Text style={{ 
-                              color: 'rgba(255,255,255,0.6)', 
-                              fontSize: 13,
-                              marginBottom: 8,
-                            }}>
-                              Profit
-                            </Text>
-                            <Text style={{
-                              color: movie.formattedProfit.startsWith('-') ? 
-                                'rgba(239, 68, 68, 0.9)' : 
-                                'rgba(74, 222, 128, 0.9)',
-                              fontSize: 16,
-                              fontWeight: '700',
-                            }}>
-                              {movie.formattedProfit}
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-
-                      {/* Footer Label - Front Side */}
-                      <View style={{
-                        borderTopWidth: 1,
-                        borderTopColor: 'rgba(255,255,255,0.1)',
-                        padding: 12,
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 8,
-                        backgroundColor: 'rgba(156, 202, 223, 0.08)',
-                        borderBottomLeftRadius: 16,
-                        borderBottomRightRadius: 16,
-                        overflow: 'hidden',
-                      }}>
-                        <LinearGradient
-                          colors={['rgba(156, 202, 223, 0.2)', 'rgba(156, 202, 223, 0.1)']}
-                          start={{ x: 0, y: 0 }}
-                          end={{ x: 1, y: 0 }}
-                          style={{
-                            position: 'absolute',
-                            left: 0,
-                            right: 0,
-                            top: 0,
-                            bottom: 0,
-                            borderBottomLeftRadius: 16,
-                            borderBottomRightRadius: 16,
-                          }}
-                        />
-                        <Ionicons 
-                          name="film-outline" 
-                          size={14} 
-                          color="#9ccadf" 
-                        />
-                        <Text style={{
-                          color: '#9ccadf',
-                          fontSize: 12,
-                          fontWeight: '600',
-                          letterSpacing: 0.3,
-                        }}>
-                          View Production Studios
-                        </Text>
-                        <Ionicons 
-                          name="chevron-forward" 
-                          size={14} 
-                          color="#9ccadf" 
-                        />
-                      </View>
-                    </View>
-                  </Animated.View>
-
-                  {/* Back Side of Card */}
-                  <Animated.View style={[
-                    {
-                      backfaceVisibility: 'hidden',
-                      backgroundColor: 'rgba(156, 202, 223, 0.05)',
-                      borderRadius: 16,
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                    },
-                    backAnimatedStyle
-                  ]}>
-                    <View style={{
-                      flex: 1,
-                      justifyContent: 'center',
-                      alignItems: 'center',
-                      padding: 16,
-                    }}>
-                      <ScrollView 
-                        showsVerticalScrollIndicator={false}
-                        contentContainerStyle={{
-                          gap: 12,
-                          paddingBottom: 16,
-                        }}
-                      >
-                        {movie.production_companies.length > 0 ? (
-                          movie.production_companies.map((company, index) => (
-                            <MotiView
-                              key={company.id}
-                              from={{
-                                opacity: 0,
-                                translateX: -20,
-                              }}
-                              animate={{
-                                opacity: 1,
-                                translateX: 0,
-                              }}
-                              transition={{
-                                type: 'timing',
-                                duration: 400,
-                                delay: index * 100,
-                              }}
-                              style={{
-                                backgroundColor: 'rgba(156, 202, 223, 0.05)',
-                                borderRadius: 12,
-                                padding: 10,
-                                flexDirection: 'row',
-                                alignItems: 'center',
-                                gap: 10,
-                                borderWidth: 1,
-                                borderColor: 'rgba(156, 202, 223, 0.1)',
-                              }}
-                            >
-                              {company.logo_path ? (
-                                <View style={{
-                                  width: 45,
-                                  height: 45,
-                                  justifyContent: 'center',
-                                  alignItems: 'center',
-                                  marginRight: 2,
-                                }}>
-                                  <MotiView
-                                    from={{
-                                      opacity: 0,
-                                      scale: 0.8,
-                                    }}
-                                    animate={{
-                                      opacity: 1,
-                                      scale: 1,
-                                    }}
-                                    transition={{
-                                      type: 'timing',
-                                      duration: 600,
-                                      delay: index * 100 + 200,
-                                    }}
-                                    style={{
-                                      position: 'absolute',
-                                      width: '100%',
-                                      height: '100%',
-                                      backgroundColor: 'rgba(156, 202, 223, 0.15)',
-                                      borderRadius: 6,
-                                      transform: [{ scale: 1.2 }],
-                                      shadowColor: '#9ccadf',
-                                      shadowOffset: { width: 0, height: 0 },
-                                      shadowOpacity: 0.3,
-                                      shadowRadius: 8,
-                                      elevation: 8,
-                                    }}
-                                  />
-                                  <Image
-                                    source={{
-                                      uri: `https://image.tmdb.org/t/p/w200${company.logo_path}`,
-                                    }}
-                                    style={{
-                                      width: '100%',
-                                      height: '100%',
-                                      resizeMode: 'contain',
-                                    }}
-                                  />
-                                </View>
-                              ) : (
-                                <View style={{
-                                  width: 45,
-                                  height: 45,
-                                  backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                                  borderRadius: 6,
-                                  justifyContent: 'center',
-                                  alignItems: 'center',
-                                  marginRight: 2,
-                                  shadowColor: '#9ccadf',
-                                  shadowOffset: { width: 0, height: 0 },
-                                  shadowOpacity: 0.2,
-                                  shadowRadius: 4,
-                                  elevation: 4,
-                                }}>
-                                  <Ionicons 
-                                    name="business-outline" 
-                                    size={18} 
-                                    color="rgba(156, 202, 223, 0.6)" 
-                                  />
-                                </View>
-                              )}
-                              <View style={{ 
-                                flex: 1, 
-                                justifyContent: 'center',
-                                paddingRight: 4,
-                              }}>
-                                <Text 
-                                  numberOfLines={1}
-                                  style={{
-                                    color: 'rgba(255,255,255,0.9)',
-                                    fontSize: 13,
-                                    fontWeight: '600',
-                                    marginBottom: 3,
-                                  }}
-                                >
-                                  {company.name}
-                                </Text>
-                                {company.origin_country && (
-                                  <View style={{
-                                    backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                                    paddingHorizontal: 6,
-                                    paddingVertical: 1,
-                                    borderRadius: 4,
-                                    alignSelf: 'flex-start',
-                                  }}>
-                                    <Text style={{
-                                      color: 'rgba(156, 202, 223, 0.8)',
-                                      fontSize: 10,
-                                      fontWeight: '500',
-                                    }}>
-                                      {company.origin_country}
-                                    </Text>
-                                  </View>
-                                )}
-                              </View>
-                            </MotiView>
-                          ))
-                        ) : (
-                          <View style={{
-                            backgroundColor: 'rgba(156, 202, 223, 0.05)',
-                            borderRadius: 12,
-                            padding: 16,
-                            alignItems: 'center',
-                            gap: 10,
-                            borderWidth: 1,
-                            borderColor: 'rgba(156, 202, 223, 0.1)',
-                          }}>
-                            <Ionicons 
-                              name="business-outline" 
-                              size={28} 
-                              color="rgba(156, 202, 223, 0.6)" 
-                            />
-                            <Text style={{
-                              color: 'rgba(255,255,255,0.5)',
-                              fontSize: 13,
-                              textAlign: 'center',
-                              fontStyle: 'italic',
-                            }}>
-                              No production companies available
-                            </Text>
-                          </View>
-                        )}
-                      </ScrollView>
-                    </View>
-
-                    {/* Footer Label - Back Side */}
-                    <View style={{
-                      position: 'absolute',
-                      bottom: 0,
-                      left: 0,
-                      right: 0,
-                      borderTopWidth: 1,
-                      borderTopColor: 'rgba(255,255,255,0.1)',
-                      padding: 12,
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 8,
-                      backgroundColor: 'rgba(156, 202, 223, 0.08)',
-                      borderBottomLeftRadius: 16,
-                      borderBottomRightRadius: 16,
-                      overflow: 'hidden',
-                    }}>
-                      <LinearGradient
-                        colors={['rgba(156, 202, 223, 0.2)', 'rgba(156, 202, 223, 0.1)']}
-                        start={{ x: 1, y: 0 }}
-                        end={{ x: 0, y: 0 }}
-                        style={{
-                          position: 'absolute',
-                          left: 0,
-                          right: 0,
-                          top: 0,
-                          bottom: 0,
-                          borderBottomLeftRadius: 16,
-                          borderBottomRightRadius: 16,
-                        }}
-                      />
-                      <Ionicons 
-                        name="stats-chart-outline" 
-                        size={14} 
-                        color="#9ccadf" 
-                      />
-                      <Text style={{
-                        color: '#9ccadf',
-                        fontSize: 12,
-                        fontWeight: '600',
-                        letterSpacing: 0.3,
-                      }}>
-                        View Movie Details
-                      </Text>
-                      <Ionicons 
-                        name="chevron-back" 
-                        size={14} 
-                        color="#9ccadf" 
-                      />
-                    </View>
-                  </Animated.View>
-                </TouchableOpacity>
-              </View>
-
-              {/* Credits Section */}
-              <CollapsibleSection 
-                title="Credits & Crew"
-                itemCount={Math.max(movie.directors?.length || 0, movie.writers?.length || 0)}
-                hasContent={Boolean(movie.directors?.length || movie.writers?.length)}
-                previewContent={
-                  <View style={{ gap: 24 }}>
-                    {/* Directors Preview */}
-                    {movie.directors?.[0] && (
-                      <View style={{
-                        borderLeftWidth: 2,
-                        borderLeftColor: '#9ccadf',
-                        paddingLeft: 16,
-                      }}>
-                        <Text style={{
-                          color: '#9ccadf',
-                          fontSize: 13,
-                          fontWeight: '600',
-                          marginBottom: 12,
-                          textTransform: 'uppercase',
-                          letterSpacing: 0.5,
-                        }}>
-                          {movie.directors.length > 1 ? 'Directors' : 'Director'}
-                        </Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                          <Text style={{
-                            color: 'rgba(255,255,255,0.9)',
-                            fontSize: 15,
-                          }}>
-                            {movie.directors[0].name}
-                          </Text>
-                          {movie.directors.length > 1 && (
-                            <Text style={{
-                              color: 'rgba(156, 202, 223, 0.7)',
-                              fontSize: 13,
-                            }}>
-                              +{movie.directors.length - 1}
-                            </Text>
-                          )}
-                        </View>
-                      </View>
-                    )}
-                    
-                    {/* Writers Preview */}
-                    {movie.writers?.[0] && (
-                      <View style={{
-                        borderLeftWidth: 2,
-                        borderLeftColor: '#9ccadf',
-                        paddingLeft: 16,
-                      }}>
-                        <Text style={{
-                          color: '#9ccadf',
-                          fontSize: 13,
-                          fontWeight: '600',
-                          marginBottom: 12,
-                          textTransform: 'uppercase',
-                          letterSpacing: 0.5,
-                        }}>
-                          Writers
-                        </Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                          <Text style={{
-                            color: 'rgba(255,255,255,0.9)',
-                            fontSize: 15,
-                          }}>
-                            {movie.writers[0].name}
-                          </Text>
-                          <View style={{
-                            paddingHorizontal: 8,
-                            paddingVertical: 2,
-                            backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                            borderRadius: 4,
-                          }}>
-                            <Text style={{
-                              color: 'rgba(156, 202, 223, 0.8)',
-                              fontSize: 12,
-                            }}>
-                              {movie.writers[0].job}
-                            </Text>
-                          </View>
-                          {movie.writers.length > 1 && (
-                            <Text style={{
-                              color: 'rgba(156, 202, 223, 0.7)',
-                              fontSize: 13,
-                            }}>
-                              +{movie.writers.length - 1}
-                            </Text>
-                          )}
-                        </View>
-                      </View>
-                    )}
-                  </View>
-                }
-              >
-                <View style={{ gap: 32 }}>
-                  {/* Full Directors List */}
-                  {movie.directors?.length > 0 && (
-                    <View style={{
-                      borderLeftWidth: 2,
-                      borderLeftColor: '#9ccadf',
-                      paddingLeft: 16,
-                    }}>
-                      <Text style={{
-                        color: '#9ccadf',
-                        fontSize: 13,
-                        fontWeight: '600',
-                        marginBottom: 16,
-                        textTransform: 'uppercase',
-                        letterSpacing: 0.5,
-                      }}>
-                        {movie.directors.length > 1 ? 'Directors' : 'Director'}
-                      </Text>
-                      <View style={{ gap: 12 }}>
-                        {movie.directors.map(director => (
-                          <Text key={director.id} style={{
-                            color: 'rgba(255,255,255,0.9)',
-                            fontSize: 15,
-                          }}>
-                            {director.name}
-                          </Text>
-                        ))}
-                      </View>
-                    </View>
-                  )}
-
-                  {/* Full Writers List */}
-                  {movie.writers?.length > 0 && (
-                    <View style={{
-                      borderLeftWidth: 2,
-                      borderLeftColor: '#9ccadf',
-                      paddingLeft: 16,
-                    }}>
-                      <Text style={{
-                        color: '#9ccadf',
-                        fontSize: 13,
-                        fontWeight: '600',
-                        marginBottom: 16,
-                        textTransform: 'uppercase',
-                        letterSpacing: 0.5,
-                      }}>
-                        Writers
-                      </Text>
-                      <View style={{ gap: 20 }}>
-                        {/* Group writers by job */}
-                        {Object.entries(
-                          movie.writers.reduce((acc, writer) => {
-                            if (!acc[writer.job]) {
-                              acc[writer.job] = [];
-                            }
-                            acc[writer.job].push(writer);
-                            return acc;
-                          }, {} as Record<string, typeof movie.writers>)
-                        ).map(([job, writers]) => (
-                          <View key={job} style={{ gap: 12 }}>
-                            <View style={{
-                              paddingHorizontal: 8,
-                              paddingVertical: 2,
-                              backgroundColor: 'rgba(156, 202, 223, 0.1)',
-                              borderRadius: 4,
-                              alignSelf: 'flex-start',
-                            }}>
-                              <Text style={{
-                                color: 'rgba(156, 202, 223, 0.8)',
-                                fontSize: 12,
-                              }}>
-                                {job}
-                              </Text>
-                            </View>
-                            <View style={{ gap: 8, paddingLeft: 4 }}>
-                              {writers.map(writer => (
-                                <Text key={writer.id} style={{
-                                  color: 'rgba(255,255,255,0.9)',
-                                  fontSize: 15,
-                                }}>
-                                  {writer.name}
-                                </Text>
-                              ))}
-                            </View>
-                          </View>
-                        ))}
-                      </View>
-                    </View>
-                  )}
-                </View>
-              </CollapsibleSection>
-
-              <ScrollToTopButton />
-            </View>
-          </ScrollView>
-        )}
-        
-        {/* Cast Tab */}
-        {activeTab === 'cast' && (
-          <View style={{ gap: 24 }}>
-            {/* Cast Grid Layout */}
-            <View style={{ alignItems: 'center', gap: 8 }}>
-              <Text style={{
-                color: 'rgba(255,255,255,0.9)',
-                fontSize: 24,
-                fontWeight: '700',
-                textAlign: 'center',
-              }}>
-                Main Cast
-              </Text>
-            </View>
-
-            <ScrollView 
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{
-                paddingBottom: 20,
-              }}
-            >
-              <View style={{
-                flexDirection: 'row',
-                flexWrap: 'wrap',
-                justifyContent: 'space-evenly',
-                gap: 16,
-                paddingHorizontal: 4,
-              }}>
-                {(movie.cast?.slice(0, 12) || []).map((item) => (
-                  <View key={item.id} style={{
-                    width: '28%',
-                    alignItems: 'center',
-                    marginBottom: 24,
-                  }}>
-                    {/* Cast Member Photo Card */}
-                    <View style={{
-                      width: 100,
-                      height: 130,
-                      borderRadius: 12,
-                      overflow: 'hidden',
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      shadowColor: '#9ccadf',
-                      shadowOffset: { width: 0, height: 0 },
-                      shadowOpacity: 0.4,
-                      shadowRadius: 8,
-                      elevation: 8,
-                      marginBottom: 12,
-                      borderWidth: 1,
-                      borderColor: 'rgba(156, 202, 223, 0.3)',
-                    }}>
-                      <Image
-                        source={{ 
-                          uri: item.profile_path 
-                            ? `https://image.tmdb.org/t/p/w200${item.profile_path}`
-                            : 'https://via.placeholder.com/200x200?text=No+Image'
-                        }}
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          resizeMode: 'cover',
-                        }}
-                      />
-                      {/* Refined gradient overlay */}
-                      <LinearGradient
-                        colors={[
-                          'transparent',
-                          'rgba(0,0,0,0.5)',
-                          'rgba(0,0,0,0.8)',
-                          'rgba(0,0,0,0.9)',
-                        ]}
-                        locations={[0, 0.5, 0.8, 1]}
-                        style={{
-                          position: 'absolute',
-                          bottom: 0,
-                          left: 0,
-                          right: 0,
-                          height: '50%',
-                          justifyContent: 'flex-end',
-                          padding: 8,
-                        }}
-                      >
-                        <Text style={{
-                          color: 'rgba(255,255,255,0.95)',
-                          fontSize: 12,
-                          fontWeight: '600',
-                          textAlign: 'center',
-                          textShadowColor: 'rgba(0,0,0,0.5)',
-                          textShadowOffset: { width: 0, height: 1 },
-                          textShadowRadius: 2,
-                        }}>
-                          {item.name}
-                        </Text>
-                      </LinearGradient>
-                    </View>
-
-                    {/* Character Name Below Card */}
-                    <Text style={{
-                      color: 'rgba(255,255,255,0.6)',
-                      fontSize: 15,
-                      textAlign: 'center',
-                      marginTop: 1,
-                    }}>
-                      {item.character}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            </ScrollView>
-            <ScrollToTopButton />
-          </View>
-        )}
-
-        {/* Extras Tab */}
         {activeTab === 'extras' && (
-          <ScrollView 
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{
-              gap: 24,
-              paddingBottom: 20,
-            }}
-          >
-            {/* Trailers Gallery */}
-            <View style={{ gap: 12 }}>
-              <View style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}>
-                <Text style={{
-                  color: 'rgba(255,255,255,0.9)',
-                  fontSize: 18,
-                  fontWeight: '600',
-                }}>
-                  Trailers
-                </Text>
-              </View>
-              
-              <TrailersSection 
-                movieId={movie.id.toString()} 
-              />
+          <View style={tabStyles.sections}>
+            <View style={tabStyles.section}>
+              <Text style={tabStyles.sectionTitle}>Trailers</Text>
+              <TrailersSection movieId={movie.id.toString()} onTrailerSelect={onTrailerSelect} />
             </View>
-
-            {/* Backdrops Gallery */}
-            <View style={{ gap: 12 }}>
-              <View style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}>
-                <Text style={{
-                  color: 'rgba(255,255,255,0.9)',
-                  fontSize: 18,
-                  fontWeight: '600',
-                }}>
-                  Backdrops
-                </Text>
-              </View>
-              <BackdropsSection 
-                movieId={movie.id.toString()}
-              />
+            <View style={tabStyles.section}>
+              <Text style={tabStyles.sectionTitle}>Backdrops</Text>
+              <BackdropsSection movieId={movie.id.toString()} onExpand={onExpandArtwork} />
             </View>
-
-            {/* Posters Gallery */}
-            <View style={{ gap: 12 }}>
-              <View style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}>
-                <Text style={{
-                  color: 'rgba(255,255,255,0.9)',
-                  fontSize: 18,
-                  fontWeight: '600',
-                }}>
-                  Posters
-                </Text>
-              </View>
-              <PostersSection 
-                movieId={movie.id.toString()}
-              />
+            <View style={tabStyles.section}>
+              <Text style={tabStyles.sectionTitle}>Posters</Text>
+              <PostersSection movieId={movie.id.toString()} onExpand={onExpandArtwork} />
             </View>
-            <ScrollToTopButton />
-          </ScrollView>
+          </View>
         )}
 
-        {/* Similar Movies Tab (Placeholder) */}
         {activeTab === 'similar' && (
-          <View>
-            <Text style={{ color: 'rgba(255,255,255,0.9)' }}>Similar movies coming soon...</Text>
-            <ScrollToTopButton />
-          </View>
+          <MovieSimilarTab movieId={movie.id.toString()} onMovieSelect={onSimilarMovieSelect} />
         )}
       </View>
     </View>
   );
 };
 
-export default MovieTabBar; 
+const tabStyles = StyleSheet.create({
+  tabBar: {
+    paddingHorizontal: 20,
+  },
+  tabRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  tabHit: {
+    paddingVertical: 12,
+  },
+  tabLabel: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 16,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  // COLOUR ONLY — the weight must not change. The row is space-between, so a label that
+  // gets wider when it goes bold redistributes every gap in the row, and the other three
+  // tabs visibly shift on each switch. The accent plus the indicator under it already say
+  // "active" without touching the metrics.
+  tabLabelActive: {
+    color: '#9ccadf',
+  },
+  tabIndicator: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 2.5,
+    backgroundColor: '#9ccadf',
+    borderRadius: 1.25,
+  },
+  tabRule: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  content: {
+    paddingTop: TAB_CONTENT_TOP,
+    paddingHorizontal: 20,
+  },
+  sections: {
+    gap: TAB_SECTION_GAP,
+  },
+  section: {
+    gap: SECTION_TITLE_GAP,
+  },
+  sectionTitle: {
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+});
+
+export default MovieTabBar;

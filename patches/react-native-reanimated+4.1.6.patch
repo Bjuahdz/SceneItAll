@@ -1,0 +1,61 @@
+diff --git a/node_modules/react-native-reanimated/lib/module/animation/util.js b/node_modules/react-native-reanimated/lib/module/animation/util.js
+index 80aa4e3..3a7823f 100644
+--- a/node_modules/react-native-reanimated/lib/module/animation/util.js
++++ b/node_modules/react-native-reanimated/lib/module/animation/util.js
+@@ -61,10 +61,16 @@ export function assertEasingIsWorklet(easing) {
+   }
+ }
+ export function initialUpdaterRun(updater) {
++  // SceneItAll patch — see src/animation/util.ts for the full explanation.
+   IN_STYLE_UPDATER.current = true;
+-  const result = updater();
+-  IN_STYLE_UPDATER.current = false;
+-  return result;
++  try {
++    return updater();
++  } catch (e) {
++    console.error('\n[Reanimated] An animated-style updater threw on its FIRST run.\n' + 'Read THIS error, not any "Cannot create property \'reduceMotion\' on\n' + 'number" that follows it — that one is a symptom with a useless stack.\n' + 'Usual causes: reading a shared value declared BELOW the hook, or calling\n' + 'a plain JS function from inside the worklet. `npm run verify` finds both.\n\n' + `${e?.message}\n${e?.stack}\n`);
++    throw e;
++  } finally {
++    IN_STYLE_UPDATER.current = false;
++  }
+ }
+ export function recognizePrefixSuffix(value) {
+   'worklet';
+diff --git a/node_modules/react-native-reanimated/src/animation/util.ts b/node_modules/react-native-reanimated/src/animation/util.ts
+index 2466ac9..a696826 100644
+--- a/node_modules/react-native-reanimated/src/animation/util.ts
++++ b/node_modules/react-native-reanimated/src/animation/util.ts
+@@ -107,10 +107,29 @@ export function assertEasingIsWorklet(
+ }
+ 
+ export function initialUpdaterRun<T>(updater: () => T) {
++  // SceneItAll patch — upstream has no try/finally here. If an updater throws,
++  // IN_STYLE_UPDATER.current sticks `true` for the rest of the session, and from
++  // then on defineAnimation() (below) returns the raw target value instead of an
++  // animation object. Every later withTiming/withSpring on the JS thread then
++  // blows up as "Cannot create property 'reduceMotion' on number '1'", which
++  // masks the original error completely. finally{} resets the flag; the
++  // console.error surfaces the real throw even if React swallows the render.
+   IN_STYLE_UPDATER.current = true;
+-  const result = updater();
+-  IN_STYLE_UPDATER.current = false;
+-  return result;
++  try {
++    return updater();
++  } catch (e) {
++    console.error(
++      '\n[Reanimated] An animated-style updater threw on its FIRST run.\n' +
++        'Read THIS error, not any "Cannot create property \'reduceMotion\' on\n' +
++        'number" that follows it — that one is a symptom with a useless stack.\n' +
++        'Usual causes: reading a shared value declared BELOW the hook, or calling\n' +
++        'a plain JS function from inside the worklet. `npm run verify` finds both.\n\n' +
++        `${(e as Error)?.message}\n${(e as Error)?.stack}\n`
++    );
++    throw e;
++  } finally {
++    IN_STYLE_UPDATER.current = false;
++  }
+ }
+ 
+ interface RecognizedPrefixSuffix {

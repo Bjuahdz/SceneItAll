@@ -16,9 +16,24 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+# Release signing keys. android/app/debug.keystore is deliberately committed and
+# excepted below — it is the public Android SDK debug key (CN=Android Debug,
+# password "android") and cannot sign a store release. Any OTHER keystore is a
+# real signing key and must never be committed.
+*.keystore
+!android/app/debug.keystore
+keystore.properties
 
 #LOCAL LOGS
 REVIVAL_LOG.md
+PROJECT-PLAN.md
+
+# Frozen copies of rejected designs, kept for reference while a surface is still in
+# flux. Local only — .txt so Metro and tsc ignore them, and out of the repo because a
+# design we chose against is not something the project needs to carry forward.
+# NOTE: FloatingCaptureBar and CaptureBurnIn were never committed, so these files are
+# the ONLY copies that exist. Don't clean the folder out without meaning it.
+design-archive/
 
 # Metro
 .metro-health-check*

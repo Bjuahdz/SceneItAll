@@ -8,12 +8,11 @@ import {
   StyleSheet,
   ImageBackground
 } from 'react-native';
-import { Link } from 'expo-router';
+import { Link, useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { FontAwesome } from '@expo/vector-icons';
 import { Movie } from '@/interfaces/interfaces';
-import { fetchMovieVideos, fetchMovieImages } from '@/services/api';
-import TrailerPlayer from '../TrailerPlayer';
+import { fetchMovieImages } from '@/services/api';
 
 interface UpcomingHeroProps {
   movie: Movie;
@@ -28,8 +27,7 @@ const LOGO_HEIGHT = 90;
 const LOGO_TOP_OFFSET = -40; // Adjust this value to change how much the logo overlaps
 
 const UpcomingHero = ({ movie, onNotify, isActive = true }: UpcomingHeroProps) => {
-  const [showTrailer, setShowTrailer] = useState(false);
-  const [trailerId, setTrailerId] = useState<string | null>(null);
+  const router = useRouter();
   const [logoPath, setLogoPath] = useState<string | null>(null);
   
   // Add an effect for image loading optimization
@@ -94,21 +92,11 @@ const UpcomingHero = ({ movie, onNotify, isActive = true }: UpcomingHeroProps) =
     }
   };
   
-  const handlePlayTrailer = async () => {
-    try {
-      const videos = await fetchMovieVideos(movie.id.toString());
-      if (videos && videos.length > 0) {
-        setTrailerId(videos[0].key);
-        setShowTrailer(true);
-      }
-    } catch (error) {
-      console.error('Error fetching videos:', error);
-    }
-  };
-  
-  const handleCloseTrailer = () => {
-    setShowTrailer(false);
-    setTrailerId(null);
+  // Trailers play ONLY inside the detail sheet's cinema flow — open the movie's
+  // sheet with the auto-trailer intent (ticket dispenses → lights dim → trailer).
+  // The sheet also owns the "no trailer found" case, so no pre-fetch needed here.
+  const handlePlayTrailer = () => {
+    router.push({ pathname: '/movie/[id]', params: { id: String(movie.id), trailer: '1' } });
   };
 
   return (
@@ -200,15 +188,6 @@ const UpcomingHero = ({ movie, onNotify, isActive = true }: UpcomingHeroProps) =
           </LinearGradient>
         </ImageBackground>
       </View>
-      
-      {/* Trailer Player */}
-      {showTrailer && trailerId && (
-        <TrailerPlayer 
-          videoId={trailerId} 
-          onClose={handleCloseTrailer} 
-          rating={'NR'}
-        />
-      )}
     </View>
   );
 };

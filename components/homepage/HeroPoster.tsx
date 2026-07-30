@@ -1,11 +1,10 @@
 import { View, Text, Dimensions, FlatList, StyleSheet, TouchableOpacity } from "react-native";
-import { Link } from "expo-router";
+import { Link, useRouter } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Movie, MovieVideo } from "@/interfaces/interfaces";
 import GenreTag from '../GenreTag';
 import { Animated } from "react-native";
-import TrailerPlayer from "../TrailerPlayer";
 import { fetchMovieVideos, fetchMovieDetails } from "@/services/api";
 import { MaterialIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -40,9 +39,8 @@ const MovieLogo = ({ path }: { path: string | null }) => {
 };
 
 const HeroPoster = ({ movies }: HeroPosterProps) => {
+  const router = useRouter();
   const [activeIndex, setActiveIndex] = useState(0);
-  const [showTrailer, setShowTrailer] = useState(false);
-  const [activeTrailerId, setActiveTrailerId] = useState<string | null>(null);
   const [trailers, setTrailers] = useState<Record<number, MovieVideo[]>>({});
   const [movieCertifications, setMovieCertifications] = useState<Record<number, string>>({});
   const [expandedSynopsis, setExpandedSynopsis] = useState<Record<number, boolean>>({});
@@ -197,17 +195,12 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
     }
   );
 
+  // Trailers play ONLY inside the detail sheet's cinema flow. Mounting a player
+  // here (the old way) fought the sheet's stagecraft and broke over the tab UI —
+  // instead, open the movie's sheet with the auto-trailer intent: the ticket
+  // dispenses, the lights dim, and the trailer starts on its own.
   const handleTrailerPlay = (movieId: number) => {
-    const movieTrailers = trailers[movieId] || [];
-    if (movieTrailers.length > 0) {
-      setActiveTrailerId(movieTrailers[0].key);
-      setShowTrailer(true);
-    }
-  };
-
-  const handleCloseTrailer = () => {
-    setShowTrailer(false);
-    setActiveTrailerId(null);
+    router.push({ pathname: '/movie/[id]', params: { id: String(movieId), trailer: '1' } });
   };
 
   const toggleSynopsis = (movieId: number) => {
@@ -450,14 +443,6 @@ const HeroPoster = ({ movies }: HeroPosterProps) => {
         })}
       />
       {paginationIndicator}
-      
-      {showTrailer && activeTrailerId && topMovies[activeIndex] && (
-        <TrailerPlayer 
-          videoId={activeTrailerId} 
-          onClose={handleCloseTrailer} 
-          rating={movieCertifications[topMovies[activeIndex].id] || DEFAULT_CERTIFICATION}
-        />
-      )}
     </View>
   );
 };
