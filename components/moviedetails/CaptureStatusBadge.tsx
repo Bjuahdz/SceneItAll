@@ -16,10 +16,19 @@ const RED = "#ef4444";
 const BADGE_HEIGHT = 36;
 
 /**
- * Recording status indicator, top-right — a bare state readout (no glass bubble: it isn't
- * a button, so it shouldn't dress like one). Text-shadowed for legibility over posters:
+ * Recording status readout, top-right — a bare readout (no glass bubble: it isn't a
+ * button, so it shouldn't dress like one). Text-shadowed for legibility over posters:
+ *   arming    → GET READY
  *   recording → ● LIVE  (the dot breathes)
  *   paused    → ❚❚ PAUSED
+ *
+ * STATE ONLY — no clock, no count. Elapsed time rides above the capture pill, and the
+ * pre-roll's 3·2·1 belongs to the full-screen overlay in the middle of the page, which
+ * is the thing you are actually looking at while it runs. Counting down up here as well
+ * made the header read as a second, competing timer.
+ *
+ * This badge renders inside the top bar's row (in the star's slot), so it folds with
+ * the chevron and the title instead of floating over them.
  *
  * Layer split on purpose: the OUTER view owns the enter/exit layout animation and the
  * static position (`style`); the INNER view owns the animated scroll-fold (`animatedStyle`)
@@ -28,10 +37,13 @@ const BADGE_HEIGHT = 36;
  */
 export default function CaptureStatusBadge({
   paused,
+  arming,
   style,
   animatedStyle,
 }: {
   paused: boolean;
+  /** True while the get-ready pre-roll runs. The count itself lives in the overlay. */
+  arming?: boolean;
   style?: any;
   animatedStyle?: any;
 }) {
@@ -57,13 +69,18 @@ export default function CaptureStatusBadge({
   return (
     <Animated.View entering={FadeIn.duration(200)} exiting={FadeOut.duration(180)} style={[styles.host, style]}>
       <Animated.View style={[styles.content, popStyle, animatedStyle]}>
-        {paused ? (
+        {arming ? null : paused ? (
           <Ionicons name="pause" size={13} color="rgba(255,255,255,0.92)" style={styles.iconShadow} />
         ) : (
           <Animated.View style={[styles.dot, dotStyle]} />
         )}
-        <Text style={[styles.label, paused ? styles.labelPaused : styles.labelLive]}>
-          {paused ? "PAUSED" : "LIVE"}
+        <Text
+          style={[
+            styles.label,
+            arming ? styles.labelArming : paused ? styles.labelPaused : styles.labelLive,
+          ]}
+        >
+          {arming ? "GET READY" : paused ? "PAUSED" : "LIVE"}
         </Text>
       </Animated.View>
     </Animated.View>
@@ -104,6 +121,9 @@ const styles = StyleSheet.create({
     textShadowColor: "rgba(0,0,0,0.65)",
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 5,
+  },
+  labelArming: {
+    color: "rgba(255,255,255,0.72)",
   },
   labelLive: {
     color: RED,

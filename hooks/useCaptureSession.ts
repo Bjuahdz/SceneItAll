@@ -12,6 +12,7 @@ import { useSharedValue, type SharedValue } from "react-native-reanimated";
 import { addTake } from "@/services/db";
 import { kickEnrichment } from "@/services/enrichment";
 import { persistTakeAudio } from "@/services/takeFiles";
+import { PREF_SKIP_COUNTDOWN, getBoolPref } from "@/services/prefs";
 
 // Max recorded length of a single take before it auto-ends. One knob.
 export const CAPTURE_DURATION_MS = 60_000;
@@ -46,26 +47,30 @@ export interface CaptureMovie {
   poster_path: string | null;
 }
 
+/**
+ * STATUS IS THE WHOLE STORY. There were once `isActive` / `isRecording` / `isPaused`
+ * convenience booleans here; nothing ever read them, because a consumer that cares about
+ * the phase is always comparing `status` anyway — and the one derived question that IS
+ * asked ("has a take actually begun?") needs the remaining/duration pair too, so it lives
+ * next to the thing that draws it, as CaptureWell's exported `isCaptureLive`.
+ *
+ * NO CAPTURE-TIME METADATA either. `isSpoiler` / `tags` / `toggleSpoiler` / `addTag` /
+ * `removeTag` were the old pill menu's surface. Spoiler marking moved to the ENTRIES tab
+ * (swipe a card, or select several and mark the batch), which is strictly better: you know
+ * whether you spoiled something after you have heard it back, not while you are talking.
+ * Tags have no UI anywhere yet — takes save with an empty list and the column waits.
+ */
 export interface CaptureSession {
   status: CaptureStatus;
-  isActive: boolean; // arming | recording | paused
-  isRecording: boolean;
-  isPaused: boolean;
   armSecondsLeft: number; // 3 → 1 during the pre-roll
   remainingMs: number; // recording countdown (frozen while paused)
   durationMs: number;
   meterLevel: SharedValue<number>; // live mic level 0..1 on the UI thread (drives the waveform)
-  // Pending entry metadata, set from the capture pill's menu, persisted on done().
-  isSpoiler: boolean;
-  tags: string[];
   start: () => void; // idle → arming (asks permission, then the pre-roll)
   cancel: () => void; // arming → idle
   pause: () => void;
   resume: () => void; // paused → 3·2·1 → recording ("Continue"; cancel returns to paused)
   startOver: () => void; // discard the current audio → 3·2·1 → record from scratch
-  toggleSpoiler: () => void;
-  addTag: (tag: string) => void;
-  removeTag: (tag: string) => void;
   done: () => void; // recording/paused → save → idle
   discard: () => void; // recording/paused → drop without saving → idle ("Delete")
 }
@@ -103,15 +108,6 @@ export function useCaptureSession(
   // the 16 Hz metering poll never re-renders the detail screen.
   const meterLevel = useSharedValue(0);
 
-  // Pending entry metadata (set from the pill menu, saved on done()). Mirrored into refs so
-  // the auto-end-at-cap path inside the rec timer reads the latest values, not a stale capture.
-  const [isSpoiler, setIsSpoiler] = useState(false);
-  const [tags, setTags] = useState<string[]>([]);
-  const isSpoilerRef = useRef(isSpoiler);
-  isSpoilerRef.current = isSpoiler;
-  const tagsRef = useRef(tags);
-  tagsRef.current = tags;
-
   // Latest movie, read inside async callbacks without stale closures.
   const movieRef = useRef(movie);
   movieRef.current = movie;
@@ -141,6 +137,34 @@ export function useCaptureSession(
     }
   }, []);
 
+  // ── The audio gate ────────────────────────────────────────────────────────────────
+  // Every recorder / audio-session operation queues on this one chain, and the value it
+  // carries is "is the mic armed right now".
+  //
+  // The 3·2·1 pre-roll used to be load-bearing: three seconds was more than enough for
+  // requestRecordingPermissions + setAudioModeAsync to land before record() was called,
+  // and for a previous take's stop() to finish before the next prepareToRecordAsync().
+  // Skip the countdown and there is nothing holding those gaps open, so iOS rejects the
+  // call outright — RecordingDisabledException, silent failure, no take. Ordering is
+  // explicit now instead of incidental, which also closes the same race on a slow first
+  // launch with the countdown ON.
+  const gateRef = useRef<Promise<boolean>>(Promise.resolve(false));
+
+  /**
+   * Run `work` after everything already in flight, passing it the current armed state.
+   * The returned promise REJECTS on failure so callers can handle it (done() must not
+   * save a take whose stop() threw); the chain itself keeps a swallowed copy so one bad
+   * step can never wedge the queue.
+   */
+  const queueAudio = useCallback(
+    (work: (armed: boolean) => Promise<boolean>): Promise<boolean> => {
+      const run = gateRef.current.then(work);
+      gateRef.current = run.catch(() => false);
+      return run;
+    },
+    []
+  );
+
   // Poll the recorder's metering while a segment is live and push a 0..1 level into
   // the shared value through an attack/release envelope: RISING levels pass almost
   // instantly (speech onsets actually register instead of being averaged away) while
@@ -164,8 +188,6 @@ export function useCaptureSession(
   const done = useCallback(async () => {
     const wasRecording = recIntervalRef.current !== null;
     const recordedMs = elapsedRef.current + (wasRecording ? Date.now() - segStartRef.current : 0);
-    const spoiler = isSpoilerRef.current; // capture before the resets below clear them
-    const entryTags = tagsRef.current;
     clearArm();
     clearRec();
     clearMeter();
@@ -174,13 +196,15 @@ export function useCaptureSession(
     setArmSecondsLeft(0);
     setRemainingMs(durationMs);
     setStatus("idle");
-    setIsSpoiler(false);
-    setTags([]);
     try {
-      await recorder.stop();
-      // Switch the iOS session back to playback so takes play through the main speaker,
-      // not the earpiece (allowsRecording: true forces the call-style earpiece route).
-      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      // Queued, so this stop cannot overlap the next take's prepare/record. Switching the
+      // iOS session back to playback makes takes play through the main speaker rather than
+      // the earpiece (allowsRecording: true forces the call-style route).
+      await queueAudio(async () => {
+        await recorder.stop();
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+        return false; // disarmed until the next start()
+      });
       const uri = recorder.uri;
       const m = movieRef.current;
       if (uri && m && recordedMs >= MIN_TAKE_MS) {
@@ -199,8 +223,10 @@ export function useCaptureSession(
           poster_path: m.poster_path,
           audio_uri: audioUri,
           duration_ms: Math.round(recordedMs),
-          is_spoiler: spoiler,
-          tags: entryTags,
+          // Both are set AFTER the fact, not here: spoiler from the ENTRIES tab once you
+          // have heard the take back, tags from nothing yet (no UI exists).
+          is_spoiler: false,
+          tags: [],
         });
         onSavedRef.current?.();
         kickEnrichment(); // transcription/enrichment picks the new take up in the background
@@ -208,7 +234,7 @@ export function useCaptureSession(
     } catch (e) {
       console.error("Failed to stop / save take:", e);
     }
-  }, [recorder, clearArm, clearRec, clearMeter, meterLevel, durationMs]);
+  }, [recorder, clearArm, clearRec, clearMeter, meterLevel, durationMs, queueAudio]);
 
   // Recording ticker — recomputes remaining from accumulated elapsed time.
   const startRecTimer = useCallback(() => {
@@ -229,19 +255,29 @@ export function useCaptureSession(
   const beginRecording = useCallback(async () => {
     elapsedRef.current = 0;
     meterLevel.value = 0;
-    segStartRef.current = Date.now();
     setRemainingMs(durationMs);
     setStatus("recording");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); // the "go"
     try {
-      await recorder.prepareToRecordAsync();
-      recorder.record();
+      // Waits for the session to actually be armed (and for any previous take's stop to
+      // finish). If the mic never got armed we bail — start()'s handler alerts and puts
+      // the screen back to idle.
+      const armed = await queueAudio(async (isArmed) => {
+        if (!isArmed) return false;
+        await recorder.prepareToRecordAsync();
+        recorder.record();
+        return true;
+      });
+      if (!armed) return;
     } catch (e) {
       console.error("Failed to start recording:", e);
     }
+    // Clock starts from when audio actually began, not from the tap — with the countdown
+    // skipped, arming the session can cost a beat on a cold start.
+    segStartRef.current = Date.now();
     startRecTimer();
     startMeter();
-  }, [recorder, durationMs, startRecTimer, startMeter, meterLevel]);
+  }, [recorder, durationMs, startRecTimer, startMeter, meterLevel, queueAudio]);
 
   // The shared 3·2·1 countdown (haptic tick each second). Every way into recording — fresh
   // start, start-over AND continue-after-pause — runs through this same get-ready pre-roll.
@@ -254,6 +290,14 @@ export function useCaptureSession(
       armNextRef.current = next;
       armCancelToRef.current = cancelTo;
       clearArm();
+      // Dev toggle: go straight to the mic. Read synchronously from the prefs cache so
+      // the decision lands on the same tick as the state flip — every entry into
+      // recording routes through here, so one check covers start, resume and start-over.
+      if (getBoolPref(PREF_SKIP_COUNTDOWN)) {
+        setArmSecondsLeft(0);
+        next();
+        return;
+      }
       let n = Math.round(ARM_DURATION_MS / 1000); // 3
       setArmSecondsLeft(n);
       setStatus("arming");
@@ -276,31 +320,44 @@ export function useCaptureSession(
   // immediately so a quick cancel works reliably. The permission / audio-session setup
   // runs in the background and only aborts the countdown if it's denied.
   const start = useCallback(() => {
-    setIsSpoiler(false); // fresh entry — clear any leftover metadata
-    setTags([]);
+    // Arm FIRST: with the countdown skipped, beginArming calls beginRecording on this very
+    // tick, and beginRecording waits on whatever is on the gate at that moment.
+    let denied = false;
+    const ready = queueAudio(async () => {
+      const perm = await requestRecordingPermissionsAsync();
+      if (!perm.granted) {
+        denied = true;
+        return false;
+      }
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      return true;
+    });
     beginArming(beginRecording, "idle");
 
     (async () => {
+      let armed = false;
       try {
-        const perm = await requestRecordingPermissionsAsync();
-        if (!perm.granted) {
-          clearArm();
-          setArmSecondsLeft(0);
-          setStatus((s) => (s === "arming" ? "idle" : s));
-          Alert.alert(
-            "Microphone access needed",
-            "Enable microphone access in Settings to record your take."
-          );
-          return;
-        }
-        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+        armed = await ready;
       } catch (e) {
         console.error("Audio setup failed:", e);
-        clearArm();
-        setStatus((s) => (s === "arming" ? "idle" : s));
+      }
+      if (armed) return;
+      // Unwind whatever is already on screen. This can't only look for "arming" — with the
+      // pre-roll skipped the screen is sitting in "recording" by now.
+      clearArm();
+      clearRec();
+      clearMeter();
+      meterLevel.value = 0;
+      setArmSecondsLeft(0);
+      setStatus((s) => (s === "arming" || s === "recording" ? "idle" : s));
+      if (denied) {
+        Alert.alert(
+          "Microphone access needed",
+          "Enable microphone access in Settings to record your take."
+        );
       }
     })();
-  }, [clearArm, beginArming, beginRecording]);
+  }, [clearArm, clearRec, clearMeter, meterLevel, beginArming, beginRecording, queueAudio]);
 
   // Guarded so it's a safe no-op unless we're still arming. Cancelling a continue-countdown
   // returns to paused (the take survives); cancelling a fresh/start-over countdown → idle.
@@ -343,21 +400,29 @@ export function useCaptureSession(
 
   // "Start over" — discard the current audio and re-arm with a fresh 3·2·1 countdown
   // (same get-ready pre-roll as a new take, not an instant hot mic). The old recording is
-  // stopped in the background while the countdown runs; metadata (spoiler / tags) is kept.
+  // stopped in the background while the countdown runs.
   const startOver = useCallback(() => {
     clearRec();
     clearMeter();
     meterLevel.value = 0;
     setRemainingMs(durationMs);
+    // Queued ahead of the re-arm so the new prepareToRecordAsync() can never overlap this
+    // stop — the session stays armed either way, it's the same mic, just a fresh file.
+    queueAudio(async (armed) => {
+      await recorder.stop();
+      return armed;
+    }).catch((e) => console.error("Failed to stop on start-over:", e));
     beginArming(beginRecording, "idle");
-    (async () => {
-      try {
-        await recorder.stop();
-      } catch (e) {
-        console.error("Failed to stop on start-over:", e);
-      }
-    })();
-  }, [clearRec, clearMeter, meterLevel, durationMs, beginArming, beginRecording, recorder]);
+  }, [
+    clearRec,
+    clearMeter,
+    meterLevel,
+    durationMs,
+    beginArming,
+    beginRecording,
+    recorder,
+    queueAudio,
+  ]);
 
   // "Delete" — stop and drop the recording without saving (no addTake), reset to idle.
   const discard = useCallback(async () => {
@@ -369,25 +434,16 @@ export function useCaptureSession(
     setArmSecondsLeft(0);
     setRemainingMs(durationMs);
     setStatus("idle");
-    setIsSpoiler(false);
-    setTags([]);
     try {
-      await recorder.stop();
-      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      await queueAudio(async () => {
+        await recorder.stop();
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+        return false; // disarmed until the next start()
+      });
     } catch (e) {
       console.error("Failed to stop on discard:", e);
     }
-  }, [recorder, clearArm, clearRec, clearMeter, meterLevel, durationMs]);
-
-  const toggleSpoiler = useCallback(() => setIsSpoiler((v) => !v), []);
-  const addTag = useCallback((tag: string) => {
-    const t = tag.trim();
-    if (!t) return;
-    setTags((prev) => (prev.includes(t) ? prev : [...prev, t]));
-  }, []);
-  const removeTag = useCallback((tag: string) => {
-    setTags((prev) => prev.filter((x) => x !== tag));
-  }, []);
+  }, [recorder, clearArm, clearRec, clearMeter, meterLevel, durationMs, queueAudio]);
 
   // Clean up timers if the screen unmounts mid-session (the recorder auto-releases).
   useEffect(
@@ -401,23 +457,15 @@ export function useCaptureSession(
 
   return {
     status,
-    isActive: status !== "idle",
-    isRecording: status === "recording",
-    isPaused: status === "paused",
     armSecondsLeft,
     remainingMs,
     durationMs,
     meterLevel,
-    isSpoiler,
-    tags,
     start,
     cancel,
     pause,
     resume,
     startOver,
-    toggleSpoiler,
-    addTag,
-    removeTag,
     done,
     discard,
   };
