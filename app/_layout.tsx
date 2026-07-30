@@ -1,11 +1,21 @@
 import { Stack } from "expo-router";
 import './globals.css';
-import { StatusBar } from "react-native";
+import { LogBox, StatusBar } from "react-native";
 import React from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { FavoritesProvider } from "@/contexts/FavoritesContext";
 import { initEnrichment } from "@/services/enrichment";
+import { loadPrefs } from "@/services/prefs";
+
+// EXPO GO ONLY, AND IT IS TELLING THE TRUTH — expo-media-library cannot get full
+// library access under Expo Go on Android, so saving artwork (ArtworkViewer) is
+// genuinely limited until we cross the dev-build gate. Nothing here fixes that;
+// the notice just fires on every launch and we already know. Kept as a single
+// exact-prefix match so an unrelated media-library problem still surfaces.
+LogBox.ignoreLogs([
+  "Due to changes in Androids permission requirements, Expo Go can no longer provide full access to the media library.",
+]);
 
 export default function RootLayout() {
   // The app is portrait everywhere. app.json's orientation is now "default"
@@ -20,6 +30,12 @@ export default function RootLayout() {
   // keep the enrichment queue draining on launch / foreground / reconnect.
   React.useEffect(() => {
     initEnrichment();
+  }, []);
+
+  // Prefs are read synchronously in places that cannot await (the capture pre-roll),
+  // so the cache is filled once here at the root. Reads before it lands fall back.
+  React.useEffect(() => {
+    loadPrefs();
   }, []);
 
   return (

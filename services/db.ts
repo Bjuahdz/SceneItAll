@@ -100,6 +100,10 @@ const getDb = (): Promise<SQLite.SQLiteDatabase> => {
     dbPromise = SQLite.openDatabaseAsync("sceneitall.db").then(async (db) => {
       await db.execAsync(`
         PRAGMA journal_mode = WAL;
+        CREATE TABLE IF NOT EXISTS app_prefs (
+          key   TEXT PRIMARY KEY NOT NULL,
+          value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS favorites (
           id            INTEGER PRIMARY KEY NOT NULL,
           title         TEXT NOT NULL,
@@ -178,6 +182,28 @@ export const addFavorite = async (movie: FavoriteMovie): Promise<void> => {
 export const removeFavorite = async (id: number): Promise<void> => {
   const db = await getDb();
   await db.runAsync("DELETE FROM favorites WHERE id = ?", [id]);
+};
+
+// Dev-panel blank slate. Returns how many rows went, so the caller can say so.
+export const deleteAllFavorites = async (): Promise<number> => {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ id: number }>("SELECT id FROM favorites");
+  await db.runAsync("DELETE FROM favorites");
+  return rows.length;
+};
+
+// ── App preferences ──────────────────────────────────────────────────────────
+// A key/value strip in the same database, so a dev toggle survives a reload without
+// pulling in a storage dependency for one boolean.
+export const readPrefs = async (): Promise<Record<string, string>> => {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ key: string; value: string }>("SELECT key, value FROM app_prefs");
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+};
+
+export const writePref = async (key: string, value: string): Promise<void> => {
+  const db = await getDb();
+  await db.runAsync("INSERT OR REPLACE INTO app_prefs (key, value) VALUES (?, ?)", [key, value]);
 };
 
 // ── Takes (the "What's your take?" journal entries) ───────────────────────────
