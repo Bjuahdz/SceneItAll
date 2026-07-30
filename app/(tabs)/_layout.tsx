@@ -27,6 +27,24 @@ import Animated, {
 } from "react-native-reanimated";
 import { NavMorphProvider, useNavMorph, NAV_SPRING } from "@/contexts/NavMorphContext";
 import {
+  NAV_BAR_H,
+  NAV_BAR_PAD,
+  NAV_BAR_R,
+  NAV_BLUR_INTENSITY,
+  NAV_BOTTOM,
+  NAV_BUBBLE_H,
+  NAV_GLASS_RIM,
+  NAV_GLASS_TINT,
+  NAV_ICON,
+  NAV_ISLAND_GAP,
+  NAV_LABEL_GAP,
+  NAV_LABEL_W,
+  NAV_SCALE,
+  NAV_SIDE_INSET,
+  NAV_SLOT_W,
+} from "@/constants/navMetrics";
+import FillGlyph from "@/components/glyphs/FillGlyph";
+import {
   SearchIslandProvider,
   useSearchIsland,
   type TabName,
@@ -56,19 +74,20 @@ const INACTIVE = "rgba(255, 255, 255, 0.85)";
 // Geometry is the SHIPPED pill's, not the board's. The board's 56/r28/slot-52 read
 // as cramped on device next to what this app already had — these are the numbers
 // that felt right before the split, so the only thing that changed is the layout.
-// ▸▸ THREE KNOBS — nothing else needs touching to re-tune the nav.
-const SCALE = 1.15; //          overall size. 1 = current, 1.1 = 10% bigger.
-const NAV_BOTTOM = 20; //      distance from the very bottom of the screen.
-const ISLAND_GAP = 14; //      how far the two islands sit apart at rest.
+// ▸▸ SCALE / NAV_BOTTOM / the glass now live in @/constants/navMetrics, because the
+//    capture pill on the movie screen has to land on exactly the same footprint. Edit
+//    them THERE and both pills move together.
+const SCALE = NAV_SCALE; //    overall size. 1 = current, 1.1 = 10% bigger.
+const ISLAND_GAP = NAV_ISLAND_GAP; // how far the two islands sit apart at rest.
 // 40 leaves a hole once the field opens, so the gap closes right down there.
 const ISLAND_GAP_OPEN = 12;
 
 const px = (n: number) => Math.round(n * SCALE);
-const BAR_H = px(54);
-const BAR_PAD = px(7);
-const BAR_RADIUS = BAR_H / 2;
-const SLOT_W = px(46);
-const BUBBLE_H = px(40);
+const BAR_H = NAV_BAR_H;
+const BAR_PAD = NAV_BAR_PAD;
+const BAR_RADIUS = NAV_BAR_R;
+const SLOT_W = NAV_SLOT_W;
+const BUBBLE_H = NAV_BUBBLE_H;
 const SATELLITE = BAR_H;
 // Scrolling no longer minimizes the bar — it eases it down to this and stops.
 // Anything smaller starts clipping the labels.
@@ -80,15 +99,14 @@ const SCROLL_SHRINK = 0.95;
 // slots then cancel exactly during a switch, so the bar's total width never
 // oscillates. Slates sits last, so its shorter word leaves its slack at the end
 // of the bar rather than mid-row — that is what per-word widths were solving.
-const LABEL_W = px(54);
+const LABEL_W = NAV_LABEL_W;
 const LABEL_W_MAX = LABEL_W;
-const LABEL_GAP = px(8);
-const ICON = px(21);
+const LABEL_GAP = NAV_LABEL_GAP;
+const ICON = NAV_ICON;
 const GLYPH_SM = px(18);
 // The islands share one fixed run of screen, so the satellite can be given a real
 // animated WIDTH instead of a flex value — flex can't be sprung.
-const SIDE_INSET = 16;
-const TOTAL_W = Dimensions.get("window").width - SIDE_INSET * 2;
+const TOTAL_W = Dimensions.get("window").width - NAV_SIDE_INSET * 2;
 // Every island is the same height and the closed ones are all the same circle —
 // nothing in this bar is allowed to look bigger than anything else.
 const CLOSE_W = BAR_H;
@@ -256,37 +274,8 @@ function SettingsGlyph({ focus, color }: { focus: SharedValue<number>; color: st
   );
 }
 
-function SlatesGlyph({ focus, color }: { focus: SharedValue<number>; color: string }) {
-  // The outline is always there; the solid one fills up through it from the base as
-  // the tab seats. A fill, not a crossfade — nothing here fades.
-  //
-  // Built from TRANSFORMS ONLY. The window is a fixed ICON-tall clip: slide it down
-  // and the solid bookmark is hidden, slide it back up and the bookmark is revealed
-  // from the base. The copy inside counter-slides by exactly the same amount, so the
-  // bookmark itself never moves on screen — only the window over it does. That is
-  // what makes it read as filling rather than rising.
-  //
-  // This used to animate the clip's HEIGHT, which was wrong twice over: it is the
-  // slow layout path, and it left the box with no height of its own, so on any frame
-  // the animated style was not applied the box sized to its content and the solid
-  // bookmark flashed in at FULL. That flash is the drain-fill-drain on the way out.
-  const clipStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: ICON * (1 - focus.value) }],
-  }));
-  const innerStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: -ICON * (1 - focus.value) }],
-  }));
-  return (
-    <View style={styles.glyphBox}>
-      <Ionicons name="bookmark-outline" size={ICON} color={color} />
-      <Animated.View style={[styles.bookmarkClip, clipStyle]} pointerEvents="none">
-        <Animated.View style={[styles.bookmarkFillInner, innerStyle]}>
-          <Ionicons name="bookmark" size={ICON} color={ACCENT} />
-        </Animated.View>
-      </Animated.View>
-    </View>
-  );
-}
+// Slates' bookmark is a FillGlyph — the movie floor's slate and trailer seats fill exactly
+// the same way, so there is one definition of the mechanic rather than three lookalikes.
 
 type GlyphKind = "universe" | "discover" | "slate" | "settings";
 
@@ -359,7 +348,9 @@ function TabSlot({
         <Animated.View style={[styles.bubble, bubbleStyle]} pointerEvents="none" />
         {config.glyph === "universe" && <UniverseGlyph focus={focus} color={color} />}
         {config.glyph === "discover" && <DiscoverGlyph focus={focus} color={color} />}
-        {config.glyph === "slate" && <SlatesGlyph focus={focus} color={color} />}
+        {config.glyph === "slate" && (
+          <FillGlyph focus={focus} outline="bookmark-outline" solid="bookmark" color={color} />
+        )}
         {config.glyph === "settings" && <SettingsGlyph focus={focus} color={color} />}
         <Animated.View style={[styles.labelWrap, labelWrapStyle]}>
           <Text numberOfLines={1} style={styles.tabLabel}>
@@ -538,7 +529,7 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
       <Animated.View style={[styles.islands, expanded && styles.islandsOpen, shrinkStyle]}>
         <Animated.View style={[styles.bar, barStyle]}>
           <BlurView
-            intensity={45}
+            intensity={NAV_BLUR_INTENSITY}
             tint="dark"
             experimentalBlurMethod="dimezisBlurView"
             style={StyleSheet.absoluteFill}
@@ -578,7 +569,7 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
           style={[styles.satellite, onSearch && styles.satelliteOn, satLayout, satFloat]}
         >
           <BlurView
-            intensity={45}
+            intensity={NAV_BLUR_INTENSITY}
             tint="dark"
             experimentalBlurMethod="dimezisBlurView"
             style={StyleSheet.absoluteFill}
@@ -676,9 +667,9 @@ const styles = StyleSheet.create({
     borderRadius: BAR_RADIUS,
     overflow: "hidden",
     // Tint over the blur; also the graceful fallback if blur is unavailable.
-    backgroundColor: "rgba(15, 15, 20, 0.45)",
+    backgroundColor: NAV_GLASS_TINT,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderColor: NAV_GLASS_RIM,
   },
   slotRow: {
     flexDirection: "row",
@@ -714,26 +705,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  // Bottom-anchored clip window over the solid bookmark. Fixed size — it is MOVED,
-  // never resized. The static transforms below are the RESTING (empty) state on
-  // purpose: if an animated style ever fails to apply for a frame, this reads empty
-  // rather than flashing a full bookmark, which is the failure the old version had.
-  bookmarkClip: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    width: ICON,
-    height: ICON,
-    overflow: "hidden",
-    justifyContent: "center",
-    alignItems: "center",
-    transform: [{ translateY: ICON }],
-  },
-  bookmarkFillInner: {
-    height: ICON,
-    justifyContent: "center",
-    transform: [{ translateY: -ICON }],
-  },
   glyphLayer: {
     position: "absolute",
     alignItems: "center",
@@ -765,9 +736,9 @@ const styles = StyleSheet.create({
     borderRadius: SATELLITE / 2,
     overflow: "hidden",
     justifyContent: "center",
-    backgroundColor: "rgba(15, 15, 20, 0.45)",
+    backgroundColor: NAV_GLASS_TINT,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderColor: NAV_GLASS_RIM,
   },
   satelliteOn: {
     borderColor: "rgba(156, 202, 223, 0.38)",
@@ -814,11 +785,5 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 15,
     padding: 0,
-  },
-  clear: {
-    width: 32,
-    height: 32,
-    alignItems: "center",
-    justifyContent: "center",
   },
 });
