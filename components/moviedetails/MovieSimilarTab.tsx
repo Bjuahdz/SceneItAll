@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Image, Pressable, StyleSheet, ScrollView, Dimensions } from 'react-native';
+import Animated, {
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 
@@ -27,6 +33,65 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_W = Math.round(SCREEN_WIDTH * 0.42);
 const POSTER_H = Math.round(CARD_W * 1.5);
 const CARD_GAP = 14;
+// Two lines of title, always — reserved whether the title needs them or not, so every
+// card is the same height and the year/rating rows line up across the rail. Letting the
+// block size itself left the meta row of a one-line title sitting above its neighbours.
+const TITLE_LINE_H = 17;
+const TITLE_BLOCK_H = TITLE_LINE_H * 2;
+
+/**
+ * One card in the rail.
+ *
+ * The Pressable carries a PLAIN style object and nothing else. It used to take a
+ * `({ pressed }) => [...]` function, which is the landmine this stack has bitten us with
+ * repeatedly: the function's styles are unreliable, and when `width: CARD_W` went missing
+ * the card sized itself to its widest CHILD instead — the title. Short titles gave a card
+ * of exactly CARD_W; long ones gave a wider card, which is why the gaps down the rail were
+ * uneven and why the snap stopped landing (snapToInterval assumes CARD_W + CARD_GAP).
+ *
+ * The press feedback therefore lives on an inner Animated.View, driven by a shared value on
+ * the UI thread. Transform only: no layout, and no opacity animation that can be starved
+ * mid-restore and leave the card dimmed while the next screen slides in.
+ */
+function SimilarCard({ movie, onPress }: { movie: SimilarMovie; onPress: () => void }) {
+  const press = useSharedValue(0);
+  const pressStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: interpolate(press.value, [0, 1], [1, 0.97]) }],
+  }));
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={() => {
+        press.value = withTiming(1, { duration: 90 });
+      }}
+      onPressOut={() => {
+        press.value = withTiming(0, { duration: 140 });
+      }}
+      style={styles.card}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${movie.title}`}
+    >
+      <Animated.View style={pressStyle}>
+        <Image
+          source={{ uri: `https://image.tmdb.org/t/p/w342${movie.poster_path}` }}
+          style={styles.poster}
+          resizeMode="cover"
+        />
+        <Text style={styles.title} numberOfLines={2}>
+          {movie.title}
+        </Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.meta}>{movie.release_date?.split('-')[0] ?? '—'}</Text>
+          <View style={styles.ratingRow}>
+            <Ionicons name="star" size={11} color="#a8690f" />
+            <Text style={styles.meta}>{movie.vote_average?.toFixed(1)}</Text>
+          </View>
+        </View>
+      </Animated.View>
+    </Pressable>
+  );
+}
 
 /**
  * The SIMILAR tab — up to 8 movies from TMDB's /movie/{id}/similar (genre + keyword
@@ -85,29 +150,7 @@ export default function MovieSimilarTab({ movieId, onMovieSelect }: MovieSimilar
       contentContainerStyle={styles.rail}
     >
       {movies.map((movie) => (
-        <Pressable
-          key={movie.id}
-          onPress={() => openMovie(movie.id)}
-          style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
-          accessibilityRole="button"
-          accessibilityLabel={`Open ${movie.title}`}
-        >
-          <Image
-            source={{ uri: `https://image.tmdb.org/t/p/w342${movie.poster_path}` }}
-            style={styles.poster}
-            resizeMode="cover"
-          />
-          <Text style={styles.title} numberOfLines={1}>
-            {movie.title}
-          </Text>
-          <View style={styles.metaRow}>
-            <Text style={styles.meta}>{movie.release_date?.split('-')[0] ?? '—'}</Text>
-            <View style={styles.ratingRow}>
-              <Ionicons name="star" size={11} color="#a8690f" />
-              <Text style={styles.meta}>{movie.vote_average?.toFixed(1)}</Text>
-            </View>
-          </View>
-        </Pressable>
+        <SimilarCard key={movie.id} movie={movie} onPress={() => openMovie(movie.id)} />
       ))}
     </ScrollView>
   );
@@ -131,12 +174,10 @@ const styles = StyleSheet.create({
     gap: CARD_GAP,
     paddingRight: 20,
   },
+  // A plain object on purpose — see SimilarCard. This width is what the rail's snap
+  // interval assumes, and it must not be able to go missing.
   card: {
     width: CARD_W,
-  },
-  cardPressed: {
-    opacity: 0.8,
-    transform: [{ scale: 0.98 }],
   },
   poster: {
     width: CARD_W,
@@ -146,10 +187,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
   },
+  // Two lines reserved whether they are used or not, so the meta rows align across the
+  // rail. A title longer than that ellipses rather than widening anything.
   title: {
     color: '#ffffff',
     fontSize: 13.5,
     fontWeight: '600',
+    lineHeight: TITLE_LINE_H,
+    height: TITLE_BLOCK_H,
     marginTop: 8,
   },
   metaRow: {

@@ -3,13 +3,10 @@ import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import * as Haptics from "expo-haptics";
 import Animated, {
-  Easing,
   FadeIn,
   useAnimatedStyle,
   useSharedValue,
-  withRepeat,
   withSpring,
-  withTiming,
 } from "react-native-reanimated";
 
 import { INK_RED, TICKET_ACCENT, ink } from "@/components/moviedetails/ticketTheme";
@@ -18,29 +15,35 @@ import type { Take } from "@/services/db";
 // The star — "one mark, three phases" (Star Toggle · States board), replacing the
 // old INFO/ENTRIES toggle outright. The bare mark, no chrome around it:
 //
-//   UNCHARTED  no takes → the CUTOUT NOTCH: void-dark fill, faint hairline — a
-//              hole punched through the artwork. No label, not tappable.
+//   UNCHARTED  no takes → the CUTOUT NOTCH: void-dark fill, NO outline — a hole
+//              punched through the artwork. No label, not tappable.
 //   PROGRESS   the latest take's enrichment prints dots around the notch, four per
 //              stage: SAVED (pending) 4 · HEARD (transcribed) 8 · UNDERSTOOD
 //              (enriched, insight still owed) 12.
-//   INFO FACE  takes exist → "INFO" label, and the notch's edge carries a slow
-//              PRISM GLINT — rose / white / ice hues drifting through each other,
-//              light on a facet rather than a blink. The signal, instead of color.
+//   INFO FACE  takes exist → "INFO" label. The notch used to carry a slow PRISM
+//              GLINT here (rose / white / ice drifting along its edge). Removed: on
+//              its own 3.2s clock it read as a thin white hairline appearing and
+//              disappearing for no reason the screen could explain. The notch is
+//              just the notch.
 //   ENTRIES    "ENTRIES" label + the star fills (accent) wearing its stipple
 //              ring. Tap to go back; the fill drains. A failed/audio-missing
 //              latest take turns the edge red (take kept — door stays open).
 
 const BOX = 44; // hit target
 const STAR = 26;
+// The base notch draws into a PADDED canvas so its lift (below) has somewhere to go — a
+// stroke centred on the path escapes half its width outward, and at 26 it was clipped by
+// the viewBox. Same 1:1 scale and same centre (13,13) as the 26 overlays, so every layer
+// still lands on the same star.
+const STAR_BOX = 32;
+const STAR_VIEWBOX = "-3 -3 32 32";
 const DOT_R = 18.5; // dot ring radius around the box center
 const DOT = 3;
 
-// The void inside the notch — a hole punched through the artwork.
-const NOTCH_VOID = "rgba(5,5,8,0.9)";
-
-// Prism hues for the glint.
-const ROSE = "#ffd6e0";
-const ICE = "#cfe6ff";
+// The void inside the notch — a hole punched through the artwork. Nearly opaque now that
+// there is no outline drawing the shape: the fill has to do all the work of reading as a
+// hole, and 0.9 let enough of the backdrop through to soften its points.
+const NOTCH_VOID = "rgba(0,0,0,0.96)";
 
 // 4-point curved star (concave edges), 26×26.
 const STAR_PATH =
@@ -79,8 +82,16 @@ export default function EntriesStar({ takesCount, status, insighted, active, has
   // star); on info the ring is enrichment progress around the notch.
   const dotCount = active ? 12 : progressDots;
 
-  // Edge of the notch: faint while uncharted, red on a failed take.
-  const edge = failed ? INK_RED : ink(hasEntries ? 0.3 : 0.22);
+  // NO EDGE in the ordinary case.
+  //
+  // The notch used to carry a faint white hairline (0.22 uncharted, 0.3 charted) to define
+  // its shape against the artwork. That outline is the grey line that kept getting noticed,
+  // and it appeared to swell on scroll even though nothing about it animated: the header
+  // scrim fading in behind it darkened its background and raised its contrast.
+  //
+  // The one stroke that survives is the failure signal. That is information — a take whose
+  // audio is gone — not decoration.
+  const edge = failed ? INK_RED : 'none';
 
   // The fill — springs in when Entries opens OR when an unseen entry waits
   // (NEW ENTRY ignition); drains when the view closes / the entry is seen.
@@ -92,29 +103,6 @@ export default function EntriesStar({ takesCount, status, insighted, active, has
   const fillStyle = useAnimatedStyle(() => ({
     opacity: fill.value,
     transform: [{ scale: 0.55 + fill.value * 0.45 }],
-  }));
-
-  // Prism glint — one slow clock; three hue overlays read it at phase offsets, so
-  // the edge appears to shift rose → white → ice as if catching moving light.
-  // Silent while the star is filled (ignited NEW ENTRY / open entries).
-  const glintOn = hasEntries && !active && !failed && !hasNew;
-  const glint = useSharedValue(0);
-  useEffect(() => {
-    if (!glintOn) {
-      glint.value = withTiming(0, { duration: 200 });
-      return;
-    }
-    glint.value = 0;
-    glint.value = withRepeat(withTiming(1, { duration: 3200, easing: Easing.linear }), -1, false);
-  }, [glintOn, glint]);
-  const roseStyle = useAnimatedStyle(() => ({
-    opacity: Math.max(0, Math.sin((glint.value + 0.0) * Math.PI * 2)) * 0.32,
-  }));
-  const whiteStyle = useAnimatedStyle(() => ({
-    opacity: Math.max(0, Math.sin((glint.value + 0.33) * Math.PI * 2)) * 0.5,
-  }));
-  const iceStyle = useAnimatedStyle(() => ({
-    opacity: Math.max(0, Math.sin((glint.value + 0.66) * Math.PI * 2)) * 0.36,
   }));
 
   const handlePress = () => {
@@ -163,31 +151,22 @@ export default function EntriesStar({ takesCount, status, insighted, active, has
           />
         ))}
 
-        {/* The notch — void-dark fill reads as a hole cut through the artwork. */}
-        <Svg width={STAR} height={STAR} viewBox="0 0 26 26">
+        {/* The notch — void-dark fill reads as a hole cut through the artwork.
+
+            THE LIFT IS A GRADIENT, NOT AN OUTLINE. A near-black mark on a near-black hero
+            is invisible, and there is no way around needing some light behind it. So two
+            very wide, very faint white strokes sit BEHIND the fill: the half of each that
+            falls inside the star is painted over, and what escapes is a soft graded haze
+            with no edge to it. Over bright artwork it is effectively invisible; over a dark
+            one it is the only thing separating the star from its backdrop.
+
+            This is deliberately NOT the old edge, which was a crisp 1.2px hairline at 30%
+            white — five times the alpha, sitting hard against the shape. */}
+        <Svg width={STAR_BOX} height={STAR_BOX} viewBox={STAR_VIEWBOX}>
+          <Path d={STAR_PATH} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={5} />
+          <Path d={STAR_PATH} fill="none" stroke="rgba(255,255,255,0.09)" strokeWidth={2.6} />
           <Path d={STAR_PATH} fill={NOTCH_VOID} stroke={edge} strokeWidth={1.2} />
         </Svg>
-
-        {/* Prism glint — three phase-shifted hues drifting along the edge. */}
-        {glintOn && (
-          <>
-            <Animated.View style={[styles.overlay, roseStyle]} pointerEvents="none">
-              <Svg width={STAR} height={STAR} viewBox="0 0 26 26">
-                <Path d={STAR_PATH} fill="none" stroke={ROSE} strokeWidth={1.3} />
-              </Svg>
-            </Animated.View>
-            <Animated.View style={[styles.overlay, whiteStyle]} pointerEvents="none">
-              <Svg width={STAR} height={STAR} viewBox="0 0 26 26">
-                <Path d={STAR_PATH} fill="none" stroke="#ffffff" strokeWidth={1.2} />
-              </Svg>
-            </Animated.View>
-            <Animated.View style={[styles.overlay, iceStyle]} pointerEvents="none">
-              <Svg width={STAR} height={STAR} viewBox="0 0 26 26">
-                <Path d={STAR_PATH} fill="none" stroke={ICE} strokeWidth={1.3} />
-              </Svg>
-            </Animated.View>
-          </>
-        )}
 
         {/* The tap fill (Paper: "fill first") — lives only while Entries is open. */}
         <Animated.View style={[styles.overlay, fillStyle]} pointerEvents="none">

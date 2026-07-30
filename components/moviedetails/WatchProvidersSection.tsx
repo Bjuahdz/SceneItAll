@@ -1,74 +1,41 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
-import { fetchWatchProviders, type MovieWatchProviders, type WatchProvider } from '@/services/api';
+import type { WatchProvider } from '@/services/api';
 
 const COOKIE = 40;
 
 const logoUrl = (p: string | null) => (p ? `https://image.tmdb.org/t/p/w92${p}` : null);
 
-// Collapse TMDB's brand variants onto one canonical name — "Amazon Prime Video with Ads",
-// "MGM+ Amazon Channel", "MGM Plus Roku Premium Channel" and "MGM Plus" are all one brand.
-const canonicalName = (name: string): string =>
-  name
-    .toLowerCase()
-    .replace(/\+/g, ' plus')
-    .replace(/\b(amazon|apple tv|roku premium|roku)\s+channel(s)?\b/g, '')
-    .replace(/\bwith ads\b/g, '')
-    .replace(/\bstandard\b/g, '')
-    .replace(/\bpremium\b/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-
 /**
  * WatchProvidersSection — "Where to watch" as a plain, evenly-spaced grid of provider
- * logos (US only, deduped across stream/rent/buy and across brand variants). No stack,
- * no animation, no toggles — every provider is simply visible, consistently, always.
+ * logos. No stack, no animation, no toggles — every provider is simply visible,
+ * consistently, always.
+ *
+ * PRESENTATION ONLY. The fetching and deduping live in useWatchProviders, because the
+ * Details card has to know whether this band will have anything in it before it draws
+ * its own border. That makes the CARD the single owner of the "is there anything here?"
+ * decision — this component renders whatever list it is handed and does not second-guess
+ * it, so there is only ever one place that answer is made.
  */
-export default function WatchProvidersSection({ movieId }: { movieId: string }) {
-  const [providers, setProviders] = useState<MovieWatchProviders | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    fetchWatchProviders(movieId).then((result) => {
-      if (alive) setProviders(result);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [movieId]);
-
-  // One flat, duplicate-free list — deduped by id AND canonical brand (TMDB repeats
-  // brands across methods, ad tiers and channel storefronts). Streaming leads, then
-  // rent, then buy.
-  const all = useMemo<WatchProvider[]>(() => {
-    if (!providers) return [];
-    const seenIds = new Set<number>();
-    const seenBrands = new Set<string>();
-    const out: WatchProvider[] = [];
-    for (const p of [...providers.flatrate, ...providers.rent, ...providers.buy]) {
-      const brand = canonicalName(p.provider_name);
-      if (seenIds.has(p.provider_id) || seenBrands.has(brand)) continue;
-      seenIds.add(p.provider_id);
-      seenBrands.add(brand);
-      out.push(p);
-    }
-    return out;
-  }, [providers]);
-
-  if (all.length === 0) return null;
-
+export default function WatchProvidersSection({
+  providers,
+  region,
+}: {
+  providers: WatchProvider[];
+  region: string;
+}) {
   return (
     <View style={styles.band}>
       <Text style={styles.bandLabel}>
-        Where to watch <Text style={styles.region}>· {providers?.region ?? 'US'}</Text>
+        Where to watch <Text style={styles.region}>· {region}</Text>
       </Text>
 
       {/* Bare logo tiles — no circle chrome, just the provider art (their logos are
           app-icon squares, so a soft corner radius is all the shaping they need).
           Only the no-logo initial fallback keeps a quiet backing chip. */}
       <View style={styles.grid}>
-        {all.map((p) => {
+        {providers.map((p) => {
           const url = logoUrl(p.logo_path);
           return url ? (
             <Image
@@ -94,8 +61,8 @@ export default function WatchProvidersSection({ movieId }: { movieId: string }) 
 }
 
 const styles = StyleSheet.create({
-  // Matches the Details card's band chrome. No top border — since the snapshot
-  // moved up to the ticket stub, this band LEADS the bento card.
+  // Padding only. The hairline between bands is owned by the card's band wrapper, so
+  // this component never needs to know whether anything sits above it.
   band: {
     paddingHorizontal: 18,
     paddingVertical: 16,

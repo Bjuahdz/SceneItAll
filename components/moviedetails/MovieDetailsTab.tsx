@@ -6,11 +6,21 @@ import * as Haptics from 'expo-haptics';
 import type { MovieDetails } from '../../interfaces/interfaces';
 import type { Person } from '../people/PersonCard';
 import WatchProvidersSection from './WatchProvidersSection';
+import { useWatchProviders } from '@/hooks/useWatchProviders';
 
 import { TICKET_ACCENT, INK_GREEN, INK_RED } from './ticketTheme';
 
 const ACCENT = TICKET_ACCENT;
 const profileUrl = (p: string | null) => (p ? `https://image.tmdb.org/t/p/w185${p}` : null);
+
+// TMDB's stacked mark, used once at the foot of the bento to credit everything in it.
+// Height drives width off the asset's own viewBox so the aspect can never drift.
+const TMDB_MARK_ASPECT = 190.24 / 81.52;
+const TMDB_MARK_H = 15;
+const TMDB_MARK_W = Math.round(TMDB_MARK_H * TMDB_MARK_ASPECT);
+
+/** 3481 → "3,481". Hermes' Intl is not dependable across platforms, so group by hand. */
+const withThousands = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
 // Studio strip: uniform slot width → clean logo-to-logo snapping.
 const STUDIO_SLOT_W = 140;
@@ -116,6 +126,13 @@ const FilmmakersList = ({ people }: { people: Person[] }) => {
   );
 };
 
+/**
+ * One cell of a bento stat row: micro label above, value beneath, centred.
+ *
+ * numberOfLines={1} on the label is deliberate. A label that wraps makes its cell taller
+ * than its neighbours, which breaks the lane the whole row reads along — better to
+ * truncate on a narrow device than to reflow the row.
+ */
 const Stat = ({
   label,
   value,
@@ -123,11 +140,18 @@ const Stat = ({
   muted,
 }: { label: string; value: string; valueColor?: string; muted?: boolean }) => (
   <View style={styles.stat}>
-    <Text style={styles.microLabel}>{label}</Text>
+    <Text numberOfLines={1} style={styles.microLabel}>
+      {label}
+    </Text>
     <Text
       numberOfLines={1}
       adjustsFontSizeToFit
-      style={[styles.statValue, muted && styles.statValueMuted, !!valueColor && { color: valueColor }]}
+      style={[
+        styles.statValue,
+        muted && styles.statValueMuted,
+        // Last so an explicit colour always wins over the muted default.
+        !!valueColor && { color: valueColor },
+      ]}
     >
       {value}
     </Text>
@@ -183,27 +207,92 @@ const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
   const hasBoxOffice = movie.budget > 0 || movie.revenue > 0;
   const profitColor = movie.formattedProfit?.startsWith('-') ? INK_RED : INK_GREEN;
 
+  // Gated on the vote COUNT, not the average: TMDB reports an unrated film as 0 votes and
+  // a 0.0 average, and printing "0.0" reads as a terrible score rather than as no score.
+  // The average is checked too because it is the one value here read via a method —
+  // `undefined > 0` is merely false, but `undefined.toFixed()` throws.
+  const hasScore = movie.vote_count > 0 && Number.isFinite(movie.vote_average);
+
+  // Where to watch, as data — so the card below can decide whether it has anything to
+  // draw a border around before it draws one.
+  const { providers, region } = useWatchProviders(String(movie.id));
+
+  // The bento's bands, in reading order. Built as a list so the hairline BETWEEN bands is
+  // decided in exactly one place: the first band never carries a rule (it would sit right
+  // under the card's own border), and dropping any band cannot leave a stray rule behind.
+  // Each node brings its own padding; the divider is applied by the wrapper below.
+  const bands: { id: string; node: React.ReactNode }[] = [];
+
+  if (providers.length > 0) {
+    bands.push({
+      id: 'watch',
+      node: <WatchProvidersSection providers={providers} region={region} />,
+    });
+  }
+
+  // The rating lives HERE rather than up in the stub's action block: it is a fact about
+  // the film, and the card is where the facts are. It gets its own band — five cells in
+  // one row read as a wall of numbers, and a score has nothing to do with a budget.
+  if (hasScore) {
+    bands.push({
+      id: 'score',
+      node: (
+        <View style={styles.band}>
+          <View style={styles.statRow}>
+            <Stat label="Score" value={movie.vote_average.toFixed(1)} />
+            <View style={styles.statDivider} />
+            <Stat label="Votes" value={withThousands(movie.vote_count)} muted />
+          </View>
+        </View>
+      ),
+    });
+  }
+
+  // Box office — three figures that only mean anything next to each other.
+  if (hasBoxOffice) {
+    bands.push({
+      id: 'money',
+      node: (
+        <View style={styles.band}>
+          <View style={styles.statRow}>
+            <Stat label="Budget" value={movie.formattedBudget} muted />
+            <View style={styles.statDivider} />
+            <Stat label="Revenue" value={movie.formattedRevenue} muted />
+            <View style={styles.statDivider} />
+            <Stat label="Profit" value={movie.formattedProfit} valueColor={profitColor} muted />
+          </View>
+        </View>
+      ),
+    });
+  }
+
   return (
     <View>
-      {/* The bento box: where to watch + box office. (The snapshot — date, stats,
-          genres — moved UP to the ticket's stub so it needs zero scrolling.) */}
-      <View style={styles.card}>
-        {/* Where to watch — renders only when TMDB/JustWatch has availability. */}
-        <WatchProvidersSection movieId={String(movie.id)} />
-
-        {/* Box office — part of the glanceable bento core. */}
-        {hasBoxOffice && (
-          <View style={[styles.band, styles.bandTop]}>
-            <View style={styles.statRow}>
-              <Stat label="Budget" value={movie.formattedBudget} muted />
-              <View style={styles.statDivider} />
-              <Stat label="Revenue" value={movie.formattedRevenue} muted />
-              <View style={styles.statDivider} />
-              <Stat label="Profit" value={movie.formattedProfit} valueColor={profitColor} muted />
+      {/* The bento box. (The snapshot — date, stats, genres — moved UP to the ticket's
+          stub so it needs zero scrolling.) It renders only when it has something in it:
+          a film with no availability, no votes and no box office used to draw an empty
+          bordered box. */}
+      {bands.length > 0 && (
+        <View style={styles.card}>
+          {bands.map(({ id, node }, i) => (
+            <View key={id} style={i > 0 ? styles.bandTop : undefined}>
+              {node}
             </View>
+          ))}
+
+          {/* Credits the whole card, not just the rating — providers, votes and money all
+              come from the same place. Always has a band above it, so its rule is always
+              correct and it can never be the only thing inside the card. */}
+          <View style={[styles.credit, styles.bandTop]}>
+            <Text style={styles.creditLabel}>Sourced from</Text>
+            <Image
+              source={require('../../assets/images/TMDB LOGO_V2.svg')}
+              style={styles.creditMark}
+              contentFit="contain"
+            />
           </View>
-        )}
-      </View>
+        </View>
+      )}
 
       {/* Filmmakers — a clean name · role list (collapsible past three), open air. */}
       {filmmakers.length > 0 && (
@@ -344,6 +433,27 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
     marginVertical: 2,
     backgroundColor: 'rgba(255,255,255,0.09)',
+  },
+
+  // Attribution strip at the foot of the bento. Quiet on purpose — it is a credit, not
+  // a row of data, so it sits below the last hairline and asks for nothing.
+  credit: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingVertical: 10,
+  },
+  creditLabel: {
+    color: 'rgba(255,255,255,0.34)',
+    fontSize: 9.5,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  creditMark: {
+    width: TMDB_MARK_W,
+    height: TMDB_MARK_H,
   },
 
   // Filmmakers — plain rows: name left, role right.
