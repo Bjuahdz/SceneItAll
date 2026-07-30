@@ -103,24 +103,27 @@ export default function LedgerCard({ ledger, absorbTakeId, onOpen, bottom }: Led
                   const lit = rows < 2 || i === tick % rows;
                   const absorbing = absorbTakeId === r.takeId;
                   return (
-                    <Animated.View
-                      key={r.takeId}
-                      entering={FadeIn.duration(400)}
-                      style={[styles.tlRow, { opacity: lit ? 1 : 0.42 }]}
-                    >
-                      <View
-                        style={[
-                          styles.tlDot,
-                          { backgroundColor: r.hue, shadowColor: r.hue },
-                          absorbing && styles.tlDotAbsorb,
-                        ]}
-                      />
-                      <Text style={styles.tlTitle} numberOfLines={1}>
-                        {r.title}
-                      </Text>
-                      <Text style={styles.tlSub}>
-                        {r.distilling ? `${r.ago} · distilling` : r.ago}
-                      </Text>
+                    // LAYERED ON PURPOSE. FadeIn animates opacity, and so does the
+                    // tick dim below — putting both on one view makes Reanimated warn
+                    // that the layout animation may overwrite the style. The wrapper
+                    // owns the entrance; the inner row owns the dim. (Same split
+                    // CaptureStatusBadge documents.)
+                    <Animated.View key={r.takeId} entering={FadeIn.duration(400)}>
+                      <View style={[styles.tlRow, { opacity: lit ? 1 : 0.42 }]}>
+                        <View
+                          style={[
+                            styles.tlDot,
+                            { backgroundColor: r.hue, shadowColor: r.hue },
+                            absorbing && styles.tlDotAbsorb,
+                          ]}
+                        />
+                        <Text style={styles.tlTitle} numberOfLines={1}>
+                          {r.title}
+                        </Text>
+                        <Text style={styles.tlSub}>
+                          {r.distilling ? `${r.ago} · distilling` : r.ago}
+                        </Text>
+                      </View>
                     </Animated.View>
                   );
                 })}
