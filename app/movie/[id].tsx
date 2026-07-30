@@ -1215,7 +1215,7 @@ const MovieDetailsView = ({
         videoId={selectedVideo}
         onClose={handleCloseVideo}
         rating={movie?.certification || 'NR'}
-        bottomOffset={LOGO_BOTTOM + 200}
+        bottomOffset={LOGO_BOTTOM + 350}
         ratingBottom={LOGO_BOTTOM - 64}
       />
 
