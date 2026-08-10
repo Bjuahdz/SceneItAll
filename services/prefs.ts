@@ -86,14 +86,6 @@ export const PREF_ANCHOR_GUIDE = "search.anchorGuide";
  */
 export const PREF_LAND_HAPTICS = "search.landHaptics";
 
-/**
- * A thock as each arriving tile lands — the audible half of the landing, mass-matched
- * to the haptic ladder (see scripts/make-thock.mjs for the sound design and its
- * knobs). Dev toggle, defaults OFF, independent of the haptics toggle so each can be
- * judged alone.
- */
-export const PREF_LAND_SOUND = "search.landSound";
-
 let cache: Record<string, string> = {};
 let loaded = false;
 const readyWaiters = new Set<() => void>();

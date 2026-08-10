@@ -20,7 +20,6 @@ import {
   PREF_ANCHOR_SKYLINE,
   PREF_BENTO_RECENTS,
   PREF_LAND_HAPTICS,
-  PREF_LAND_SOUND,
   PREF_DEMO_ARRIVALS,
   PREF_DEMO_ARRIVAL_MAX,
   PREF_MIC_USED,
@@ -229,7 +228,6 @@ export default function SettingsScreen() {
   const anchorSkyline = useBoolPref(PREF_ANCHOR_SKYLINE, false);
   const anchorGuide = useBoolPref(PREF_ANCHOR_GUIDE, false);
   const landHaptics = useBoolPref(PREF_LAND_HAPTICS, false);
-  const landSound = useBoolPref(PREF_LAND_SOUND, false);
   /**
    * LOCAL until Apply — the whole point of the button is that dragging around to
    * explore numbers commits nothing. Only Apply writes the pref the seeder reads.
@@ -497,15 +495,6 @@ export default function SettingsScreen() {
             label="Landing haptics"
             value={landHaptics}
             onValueChange={(v) => setBoolPref(PREF_LAND_HAPTICS, v)}
-          />
-          <View style={styles.divider} />
-          {/* The thock — the audible half of the landing, mass-matched like the
-              haptics. Independent toggle so each can be judged alone. */}
-          <ToggleRow
-            icon="volume-low-outline"
-            label="Landing sound"
-            value={landSound}
-            onValueChange={(v) => setBoolPref(PREF_LAND_SOUND, v)}
           />
           <View style={styles.divider} />
           {/* The dashed tuning lines: fixed LIFT line + moving PREV SKYLINE line.

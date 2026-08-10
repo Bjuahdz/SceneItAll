@@ -19,7 +19,6 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import * as Haptics from "expo-haptics";
-import { setAudioModeAsync, setIsAudioActiveAsync, useAudioPlayer } from "expo-audio";
 import { StatusBar } from "expo-status-bar";
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
@@ -41,7 +40,7 @@ import EmptyState from "@/components/search/EmptyState";
 import ResultRow from "@/components/search/ResultRow";
 import QueryEcho from "@/components/search/QueryEcho";
 import RecentsBoard, { ANCHOR_LIFT } from "@/components/search/RecentsBoard";
-import type { LandCue, LandWeight } from "@/components/search/RecentTile";
+import type { LandWeight } from "@/components/search/RecentTile";
 import SkeletonRows from "@/components/search/SkeletonRows";
 import SubmittedState from "@/components/search/SubmittedState";
 import KindRow, { KIND_ROW_LABEL, KIND_UNIT, ROW_KINDS } from "@/components/search/KindRow";
@@ -54,7 +53,6 @@ import {
   PREF_BENTO_RECENTS,
   PREF_DEMO_ARRIVALS,
   PREF_LAND_HAPTICS,
-  PREF_LAND_SOUND,
 } from "@/services/prefs";
 import { useSearch } from "@/hooks/useSearch";
 import { useVault } from "@/hooks/useVault";
@@ -186,43 +184,15 @@ const AURORA_CUT = 220;
  * `Soft` deliberately: a cascade of up to ~30 taps has to read as a settling, and
  * Medium/Heavy repeated thirty times is a pneumatic drill, not a premium detail.
  */
-/** Floor between landing cues. Haptic and sound share the CONSTANT but run
- *  separate clocks — the sound cue deliberately leads the haptic on every landing
- *  (see LAND_SOUND_AT in RecentTile), so one clock would self-swallow. A no-op at
- *  today's 150ms stagger; it exists so that lowering LAND_STEP later cannot turn
- *  the cascade into a buzz. */
+/** Floor between landing cues. A no-op at today's 150ms stagger; it exists so
+ *  that lowering LAND_STEP later cannot turn the cascade into a buzz.
+ *
+ *  (The landing once had an audible half — the "thock", a synthesized per-mass
+ *  sound riding this same cue. Bryan deleted it entirely 2026-08-10 after two
+ *  latency rounds hit Expo Go's audio-stack floor: "doesn't add too much to the
+ *  design". If a landing sound ever returns, it needs a dev build, and the
+ *  transcript history has the full sound design + latency contract.) */
 const CUE_MIN_GAP = 90;
-
-/**
- * ▸ THE THOCK (dev toggle, PREF_LAND_SOUND) — the audible half of the landing.
- * Generated assets, same practice as the capture DING/THUD — see
- * scripts/make-thock.mjs for the sound design and every tunable number (pitch,
- * decay, tick, creaminess). Mass-matched to the haptic ladder. These volumes are
- * the in-app half of the tuning: the samples are normalised, so relative loudness
- * between masses lives HERE, not in the WAVs.
- *
- * ⚠ THE LATENCY CONTRACT (device verdict 2026-08-09: "very delayed" — while the
- * haptic on the SAME cue read on time, so the lag was all in the audio path):
- *  · players are PARKED AT ZERO — a finished thock immediately seeks home, so the
- *    hot path is `play()` alone. The old `seekTo(0); play()` made every trigger
- *    wait on an async native seek round trip before sound could start.
- *  · the audio session is activated when the pref flips ON — iOS charges session
- *    activation to the first sound, and that bill must be paid in Settings, not
- *    on the first landing of a cascade.
- *  · the samples themselves front-load their energy (peak < 5ms — the generator
- *    prints the check); V1's smeared onset read late even when playback wasn't.
- *
- * The thock RESPECTS THE RINGER SWITCH (playsInSilentMode: false) — it is a UI
- * sound, not content. Silent phone = silent landing, by design. It also mixes
- * with other apps' audio instead of pausing it. The capture flows set their own
- * audio mode around their own lifecycle, so the two never fight.
- */
-const THOCK_SRC = {
-  light: require("@/assets/sounds/thock-light.wav"),
-  medium: require("@/assets/sounds/thock-medium.wav"),
-  heavy: require("@/assets/sounds/thock-heavy.wav"),
-} as const;
-const THOCK_VOLUME: Record<LandWeight, number> = { light: 0.45, medium: 0.55, heavy: 0.7 };
 
 /**
  * ▸ THE MASTHEAD MORPH — every number Bryan tunes lives here.
@@ -724,51 +694,11 @@ export default function SearchScreen() {
    * effect would tear down and restart a cascade already in flight.
    */
   const landHaptics = useBoolPref(PREF_LAND_HAPTICS, false);
-  const landSound = useBoolPref(PREF_LAND_SOUND, false);
   const hapticsRef = useRef(landHaptics);
   hapticsRef.current = landHaptics;
-  const soundRef = useRef(landSound);
-  soundRef.current = landSound;
   const focusRef = useRef(isFocused);
   focusRef.current = isFocused;
-  // One gap clock PER CHANNEL: the sound cue leads the haptic cue on the same
-  // landing (LAND_SOUND_AT vs LAND_HAPTIC_AT), so a shared clock would let every
-  // tile's own early thock swallow its own haptic.
   const lastTapAt = useRef(0);
-  const lastThockAt = useRef(0);
-  // The three thock voices, retriggered `seekTo(0); play()` like the capture chime.
-  // Hook-managed players are lifecycle-safe; the ref keeps onTileLand identity-stable.
-  const thockLight = useAudioPlayer(THOCK_SRC.light);
-  const thockMedium = useAudioPlayer(THOCK_SRC.medium);
-  const thockHeavy = useAudioPlayer(THOCK_SRC.heavy);
-  const thockRef = useRef({ light: thockLight, medium: thockMedium, heavy: thockHeavy });
-  thockRef.current = { light: thockLight, medium: thockMedium, heavy: thockHeavy };
-  useEffect(() => {
-    thockLight.volume = THOCK_VOLUME.light;
-    thockMedium.volume = THOCK_VOLUME.medium;
-    thockHeavy.volume = THOCK_VOLUME.heavy;
-  }, [thockLight, thockMedium, thockHeavy]);
-  // Park-at-zero: the moment a thock finishes it seeks home, so the NEXT trigger
-  // is `play()` alone — no async seek between the cue and the sound. See the
-  // latency contract on THOCK_SRC.
-  useEffect(() => {
-    const players = [thockLight, thockMedium, thockHeavy];
-    const subs = players.map((p) =>
-      p.addListener("playbackStatusUpdate", (s) => {
-        if (s.didJustFinish) p.seekTo(0).catch(() => {});
-      })
-    );
-    return () => subs.forEach((s) => s.remove());
-  }, [thockLight, thockMedium, thockHeavy]);
-  // Session activation is paid HERE, on the Settings flip (or mount with the pref
-  // already on) — never by the first landing. Activate-only: other surfaces
-  // (capture) manage their own mode around their own lifecycle.
-  useEffect(() => {
-    if (!landSound) return;
-    setAudioModeAsync({ playsInSilentMode: false, interruptionMode: "mixWithOthers", allowsRecording: false })
-      .then(() => setIsAudioActiveAsync(true))
-      .catch(() => {});
-  }, [landSound]);
   /** ⚠ IDENTITY-STABLE (empty deps, everything through refs). It is handed to every
    *  tile as a prop and captured in a worklet; a changing identity would churn sixty
    *  reactions mid-cascade.
@@ -776,44 +706,21 @@ export default function SearchScreen() {
    *  The cue arrives carrying the tile's MASS (see LandWeight in RecentTile) and the
    *  style ladder is the whole fix for the continuous-burst feel: Light for bricks,
    *  Medium for portraits, Heavy for spans — different objects, not a metronome.
-   *  Soft was the mistake: muffled and identical, thirty of them are one texture.
-   *
-   *  Each landing now cues TWICE: "sound" while the tile is still falling (the
-   *  thock's dispatch must LEAD its arrival by the audio stack's travel time —
-   *  see LAND_SOUND_AT in RecentTile) and "haptic" at the seat. Same landing,
-   *  two dispatch moments, so each channel keeps its own gap clock — one shared
-   *  clock would let a tile's early sound eat its own haptic. */
-  const onTileLand = useCallback((weight: LandWeight, cue: LandCue) => {
-    if (!focusRef.current) return;
+   *  Soft was the mistake: muffled and identical, thirty of them are one texture. */
+  const onTileLand = useCallback((weight: LandWeight) => {
+    if (!focusRef.current || !hapticsRef.current) return;
     const now = Date.now();
-    if (cue === "haptic") {
-      if (!hapticsRef.current) return;
-      // Spans always land — they are the cascade's punctuation, and dropping one
-      // because a brick beat it by 60ms would invert the physics.
-      if (weight !== "heavy" && now - lastTapAt.current < CUE_MIN_GAP) return;
-      lastTapAt.current = now;
-      const style =
-        weight === "heavy"
-          ? Haptics.ImpactFeedbackStyle.Heavy
-          : weight === "medium"
-            ? Haptics.ImpactFeedbackStyle.Medium
-            : Haptics.ImpactFeedbackStyle.Light;
-      Haptics.impactAsync(style).catch(() => {});
-      return;
-    }
-    if (!soundRef.current) return;
-    if (weight !== "heavy" && now - lastThockAt.current < CUE_MIN_GAP) return;
-    lastThockAt.current = now;
-    try {
-      const p = thockRef.current[weight];
-      // Parked at zero (the finish listener's job) → play() fires immediately.
-      // A non-zero position means a mid-flight retrigger or a missed park —
-      // only THEN pay the seek, exactly the old behaviour as a fallback.
-      if (p.currentTime > 0) p.seekTo(0).catch(() => {});
-      p.play();
-    } catch {
-      // A missed thock is silence, not an error worth surfacing mid-cascade.
-    }
+    // Spans always land — they are the cascade's punctuation, and dropping one
+    // because a brick beat it by 60ms would invert the physics.
+    if (weight !== "heavy" && now - lastTapAt.current < CUE_MIN_GAP) return;
+    lastTapAt.current = now;
+    const style =
+      weight === "heavy"
+        ? Haptics.ImpactFeedbackStyle.Heavy
+        : weight === "medium"
+          ? Haptics.ImpactFeedbackStyle.Medium
+          : Haptics.ImpactFeedbackStyle.Light;
+    Haptics.impactAsync(style).catch(() => {});
   }, []);
 
   const onArrival = useCallback(

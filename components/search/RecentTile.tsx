@@ -265,33 +265,6 @@ export const LAND_RESOLVE_MS = TEXT_LEAD + TEXT_MS;
 const LAND_HAPTIC_AT = 0.92;
 
 /**
- * ▸ WHERE THE SOUND ARMS — earlier than the haptic, ON PURPOSE.
- *
- * Round two on "the thock is very delayed" (2026-08-09). Round one removed every
- * removable cost from the audio path (parked players, pre-activated session,
- * front-loaded samples) and it STILL read late — because the remaining travel is
- * irreducible: the runOnJS hop onto a JS thread that is mid-cascade busy, plus
- * the platform player's own start-up. A sound dispatched at the moment it should
- * be HEARD is late by exactly that stack, every time.
- *
- * So the tile arms its burst while still falling, and the audio emerges as it
- * seats. The tile still owns its own sound — this is the same position-based
- * crossing as the haptic, just earlier on the same curve. The haptic keeps
- * LAND_HAPTIC_AT: it has no start-up cost worth leading.
- *
- * THE FRACTION IS A LEAD IN MILLISECONDS, derived from the landing spring itself
- * (Reanimated's duration-spring math for LAND_MS 1800 / damping 0.84, solved in
- * scripts — the curve, not a guess). Time from each threshold to the 0.92 seat:
- *
- *    0.85 →  92ms      0.75 → 180ms      0.65 → 246ms
- *    0.80 → 139ms      0.70 → 215ms      0.60 → 275ms
- *
- * 0.75 ≈ 180ms covers a busy-thread hop plus player start-up. Sound arrives
- * AFTER the tile seats → LOWER this. Sound arrives BEFORE it seats → RAISE it.
- */
-const LAND_SOUND_AT = 0.75;
-
-/**
  * ▸ THE CUE CARRIES THE TILE'S MASS — the fix for "a continuous burst".
  *
  * With accurate timing the haptics STILL fused into one texture, and the reason is
@@ -304,11 +277,7 @@ const LAND_SOUND_AT = 0.75;
  * being a metronome and becomes objects seating.
  */
 export type LandWeight = "light" | "medium" | "heavy";
-/** Which half of the landing a cue announces: the SOUND arms early (it has a
- *  stack to travel), the HAPTIC fires at the seat (it doesn't). One landing,
- *  two dispatch moments — see LAND_SOUND_AT. */
-export type LandCue = "sound" | "haptic";
-const NO_TAP = (_w: LandWeight, _c: LandCue) => {};
+const NO_TAP = (_w: LandWeight) => {};
 
 export default function RecentTile({
   tile,
@@ -341,10 +310,10 @@ export default function RecentTile({
    *  move as one field, once. */
   reflow: SharedValue<number>;
   onPress: (tile: PositionedTile, rect?: MarqueeRect, remeasure?: MarqueeRemeasure) => void;
-  /** Fired from the UI thread as this tile closes on its slot — once per cue kind,
-   *  carrying the tile's weight. "sound" arms early (LAND_SOUND_AT), "haptic"
-   *  fires at the seat (LAND_HAPTIC_AT). The screen decides what each becomes. */
-  onLand?: (weight: LandWeight, cue: LandCue) => void;
+  /** Fired once, from the UI thread, when this tile reaches its slot, carrying the
+   *  tile's weight — see LAND_HAPTIC_AT and LandWeight. The screen decides whether
+   *  and how the cue becomes a haptic. */
+  onLand?: (weight: LandWeight) => void;
 }) {
   const { search, shape, span, x, y, width, height } = tile;
   const ref = useRef<View>(null);
@@ -402,8 +371,7 @@ export default function RecentTile({
     () => land.value,
     (v, prev) => {
       if (!isLanding || prev === null) return;
-      if (prev < LAND_SOUND_AT && v >= LAND_SOUND_AT) runOnJS(tap)(landWeight, "sound");
-      if (prev < LAND_HAPTIC_AT && v >= LAND_HAPTIC_AT) runOnJS(tap)(landWeight, "haptic");
+      if (prev < LAND_HAPTIC_AT && v >= LAND_HAPTIC_AT) runOnJS(tap)(landWeight);
     }
   );
 

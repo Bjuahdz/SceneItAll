@@ -7,7 +7,7 @@ import {
   type SharedValue,
 } from "react-native-reanimated";
 
-import RecentTile, { LAND_RESOLVE_MS, type LandCue, type LandWeight } from "./RecentTile";
+import RecentTile, { LAND_RESOLVE_MS, type LandWeight } from "./RecentTile";
 import type { MarqueeRect, MarqueeRemeasure } from "./Marquee";
 import { FONT, SEARCH_LAYOUT, SIGNAL, TRACK } from "@/constants/signal";
 import { boardMetrics, packRecents, type PositionedTile } from "@/services/recentsBoard";
@@ -144,7 +144,7 @@ export default function RecentsBoard({
   /** Raised by each arriving tile as it reaches its slot, carrying the tile's mass —
    *  the screen turns it into a haptic if the pref is on and the tab is focused.
    *  Must be identity-stable. */
-  onTileLand?: (weight: LandWeight, cue: LandCue) => void;
+  onTileLand?: (weight: LandWeight) => void;
 }) {
   const { pendingLandSession, clearPendingLand } = useRecentSearches();
   const { width, height: viewportH } = useWindowDimensions();
