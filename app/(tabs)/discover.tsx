@@ -191,7 +191,16 @@ const Search = () => {
 
   useEffect(() => {
     if (searchResults?.length! > 0 && searchResults?.[0]) {
-      updateSearchCount(searchQuery, searchResults[0]);
+      // Legacy tab, movies only — adapted to the revived ledger's shape
+      // (services/appwrite.ts). This tab stored POSTER paths and still does.
+      const top = searchResults[0];
+      updateSearchCount(searchQuery, {
+        entityType: "movie",
+        id: top.id,
+        title: top.title,
+        year: top.release_date ? top.release_date.slice(0, 4) : null,
+        imagePath: top.poster_path ?? null,
+      });
     }
   }, [searchResults]);
 
