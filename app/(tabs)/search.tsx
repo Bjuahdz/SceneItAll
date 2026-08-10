@@ -522,18 +522,6 @@ export default function SearchScreen() {
   );
 
   /**
-   * ▸ THE TOP EDGE ONLY EXISTS ONCE YOU HAVE SCROLLED.
-   *
-   * A permanent top gradient would sit over the board's own masthead and dim it at
-   * rest, which is a fade solving a problem that is not there yet. Content only needs
-   * dissolving once there is content passing under the edge. 24pt of travel is enough
-   * to be fully on before anything has really moved.
-   */
-  const topEdgeStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollY.value, [0, 24], [0, 1], Extrapolation.CLAMP),
-  }));
-
-  /**
    * ▸ THE COLLAPSED HEADER'S GATE. 1 when the RECENT bar may show (the scroll still
    * decides whether it does), 0 for the whole cascade — Bryan's priority rule: "the
    * animation always takes priority... only after do we show the masthead." The gate
@@ -591,6 +579,40 @@ export default function SearchScreen() {
       easing: Easing.out(Easing.sin),
     });
   }, [composing, morphGate]);
+
+  /**
+   * ▸ THE TOP EDGE ONLY EXISTS ONCE YOU HAVE SCROLLED — AND ONLY WHEN THE
+   * MASTHEAD AGREES IT HAS.
+   *
+   * A permanent top gradient would sit over the board's own masthead and dim it at
+   * rest, which is a fade solving a problem that is not there yet. Content only needs
+   * dissolving once there is content passing under the edge. 24pt of travel is enough
+   * to be fully on before anything has really moved.
+   *
+   * ⚠ THE GATES ARE THE FIX FOR "THE GLASS IS ON BUT NOTHING IS COLLAPSED"
+   * (Bryan, device, 2026-08-10: arriving at RECENT from another tab, "the alpha
+   * mask [is] slightly visible towards the top" while RECENT and its count sit
+   * uncollapsed). Raw `scrollY` was this layer's ONLY input, while the masthead
+   * over it reads that same scroll through TWO gates — so the two could describe
+   * different worlds, and the glass was the one lying. Both cases it produced:
+   *   · ANCHORED ARRIVAL — the board deliberately starts deep-scrolled so the old
+   *     skyline waits at the bottom, and `headGate` holds the masthead down for the
+   *     whole cascade ("the animation always takes priority"). scrollY is 700+ from
+   *     frame one, so the glass came up alone, over an uncollapsed masthead.
+   *     Random-feeling because it needs a session to have arrived while you were away.
+   *   · COMPOSE — `morphGate` pins the morph at rest, but a stale scroll from the
+   *     results list kept the glass lit over a blank sheet.
+   * Multiplying by both gates makes this layer obey the same truth as the type it
+   * sits over. It deliberately does NOT touch `scrollY`: sixty tile worklets read
+   * that value for their arrive/depart fades, and rewriting it to fix a chrome
+   * layer would move the board itself.
+   */
+  const topEdgeStyle = useAnimatedStyle(() => ({
+    opacity:
+      interpolate(scrollY.value, [0, 24], [0, 1], Extrapolation.CLAMP) *
+      headGate.value *
+      morphGate.value,
+  }));
   /**
    * ▸ THE MASTHEAD MORPH — the entity pages' travel, literal.
    *

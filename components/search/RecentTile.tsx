@@ -51,6 +51,43 @@ const PERSON_FOCUS = 0.16;
 const TITLE_SIZE = { span: 22, portrait: 12, wide: 11 } as const;
 
 /**
+ * ▸ THE SCRIM — one ramp, two copies, no traceable edge.
+ *
+ * The darkening under a tile's name. It has to make a title readable over a bright
+ * poster without turning the artwork to mud, and — Bryan, device, 2026-08-10 — it
+ * must never announce itself: "you can actually see the really rough and abrupt line
+ * of the overlay on top of the tile."
+ *
+ * ⚠ WHY THERE WAS A LINE, AND IT IS NOT WHERE IT LOOKS. The old ramp was three
+ * stops, `0 → 0.74 → 0.96` at `0 / 0.6 / 1`. Its alpha REACHES zero at the top edge,
+ * so nothing is drawn there — but its SLOPE does not: above the box the alpha is
+ * flat at zero, and one pixel below it is already climbing at full rate. The eye
+ * reads a discontinuity in the first derivative as an edge (Mach banding) even
+ * though every pixel value is correct. That is the "abrupt line", and no amount of
+ * lowering the alpha could remove it — a gentler linear ramp just moves a fainter
+ * line to the same place.
+ *
+ * THE FIX IS AN EASED ONSET: the ramp now leaves zero almost flat (0.04 over the
+ * first sixth) and only then bends into the old curve. The stops below are chosen so
+ * that at every ABSOLUTE distance from the tile's foot the alpha matches the old
+ * ramp within a couple of percent — the text zone is exactly as legible as Bryan
+ * signed off on; only the invisible top gained a soft lead-in, which is why the
+ * heights grew by ~38% (that extra height is the whisper, not more darkness).
+ */
+const SCRIM_H = { span: 180, portrait: 116, wide: 80 } as const;
+/** Top → bottom, one ground colour throughout — only the alpha moves. Paired
+ *  positionally with SCRIM_STOPS; the two must stay the same length. */
+const SCRIM_COLORS = [
+  groundAlpha(0),
+  groundAlpha(0.04),
+  groundAlpha(0.1),
+  groundAlpha(0.37),
+  groundAlpha(0.74),
+  groundAlpha(0.96),
+] as const;
+const SCRIM_STOPS = [0, 0.17, 0.28, 0.5, 0.71, 1] as const;
+
+/**
  * ▸ TILES FLOAT IN AT THE BOTTOM AND FLOAT AWAY AT THE TOP.
  *
  * The first pass only animated arrivals, and gently — Bryan: "I don't even see it...
@@ -533,9 +570,9 @@ export default function RecentTile({
   // Spans only. See TITLE_SIZE — at one column wide there is no room for a second line.
   const showMeta = span;
   const inset = span ? 14 : 9;
-  // A one-unit tile is ~79pt tall; a 112pt scrim would be the entire thing. The ramp
-  // has to stay proportionate to what it is darkening or the artwork goes muddy.
-  const scrimHeight = span ? 130 : shape === "portrait" ? 84 : 58;
+  // A one-unit tile is ~79pt tall, so the ramp is capped at the tile: a scrim taller
+  // than what it darkens is just a tint. See SCRIM_H for why these grew.
+  const scrimHeight = span ? SCRIM_H.span : shape === "portrait" ? SCRIM_H.portrait : SCRIM_H.wide;
 
   return (
     // The ref sits on the ANIMATED view, not the Pressable, because that is the box
@@ -597,12 +634,12 @@ export default function RecentTile({
             // entrance.
             transition={0}
           />
-          {/* Same ground colour at every stop — only the alphas differ. The name has
-              to read over a bright poster without the picture going muddy, so the
-              ramp stays clear through the top two thirds and only floods at the foot. */}
+          {/* Same ground colour at every stop — only the alphas differ. See SCRIM_H:
+              eased onset so the ramp has no traceable top edge, the flood kept at
+              the foot where the name is. */}
           <LinearGradient
-            colors={[groundAlpha(0), groundAlpha(0.74), groundAlpha(0.96)]}
-            locations={[0, 0.6, 1]}
+            colors={SCRIM_COLORS}
+            locations={SCRIM_STOPS}
             style={[styles.scrim, { height: Math.min(height, scrimHeight) }]}
             pointerEvents="none"
           />
@@ -657,6 +694,23 @@ export default function RecentTile({
                 left: "50%",
               }}
               blurRadius={LAND_BLUR}
+            />
+            {/* ▸ THE GHOST CARRIES THE SCRIM TOO — the other half of Bryan's
+                "consistent and reliable, no matter if we're in transitions".
+                The blurred copy used to be bare artwork while the sharp copy
+                underneath was already scrimmed, so the ghost's dissolve was ALSO a
+                dissolve of the darkening: the ramp faded up over the last third of
+                every landing, arriving on a bright poster at exactly the moment the
+                picture snapped into focus. Two edges appearing at once reads as
+                noise in the tile. With the identical ramp on both layers the scrim
+                is simply CONSTANT across the whole arrival — the crossfade can no
+                longer reveal or hide it, and only the focus is left changing.
+                Same stops, same height, inset to the ghost's own footprint. */}
+            <LinearGradient
+              colors={SCRIM_COLORS}
+              locations={SCRIM_STOPS}
+              style={[styles.ghostScrim, { height: Math.min(height, scrimHeight) }]}
+              pointerEvents="none"
             />
           </Animated.View>
         )}
@@ -759,6 +813,17 @@ const styles = StyleSheet.create({
     filter: [{ grayscale: GRAYSCALE.backdrop }],
   },
   scrim: { position: "absolute", left: 0, right: 0, bottom: 0 },
+  /** The ghost's copy of it — inset to the tile footprint inside the oversized
+   *  bleed box, exactly like the picture it sits on. Rounded at the foot so it can
+   *  never draw square corners past the artwork's own radius. */
+  ghostScrim: {
+    position: "absolute",
+    left: GHOST_BLEED,
+    right: GHOST_BLEED,
+    bottom: GHOST_BLEED,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+  },
   bloom: { backgroundColor: accentAlpha(1), mixBlendMode: "screen" },
   /** A descending ghost crosses the settled field on its way down; it must pass in
    *  FRONT of it, or the emergence reads as a card sliding under the furniture. */
