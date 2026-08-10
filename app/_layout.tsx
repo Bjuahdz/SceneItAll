@@ -4,7 +4,10 @@ import { StatusBar } from "react-native";
 import React from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as ScreenOrientation from "expo-screen-orientation";
+import { useFonts } from "expo-font";
+import { EntityOverlayProvider } from "@/contexts/EntityOverlayContext";
 import { FavoritesProvider } from "@/contexts/FavoritesContext";
+import { RecentSearchesProvider } from "@/contexts/RecentSearchesContext";
 import { initEnrichment } from "@/services/enrichment";
 import { loadPrefs } from "@/services/prefs";
 
@@ -30,6 +33,19 @@ import { loadPrefs } from "@/services/prefs";
 //                                           an EXACT 2.3.0 for this reason. See REVIVAL_LOG #23.
 
 export default function RootLayout() {
+  // The Signal type system: Bricolage Grotesque for display, JetBrains Mono for the
+  // micro labels. Static instances rather than the variable originals — React Native
+  // cannot reliably select a weight axis, so each weight ships as its own family.
+  // Both are SIL Open Font License, so bundling them is fine.
+  //
+  // The KEY is the family name you reference in styles; keep these in sync with
+  // FONT in constants/signal.ts.
+  const [fontsLoaded, fontError] = useFonts({
+    BricolageGrotesque_800ExtraBold: require("../assets/fonts/BricolageGrotesque-ExtraBold.ttf"),
+    JetBrainsMono_400Regular: require("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    JetBrainsMono_500Medium: require("../assets/fonts/JetBrainsMono-Medium.ttf"),
+  });
+
   // The app is portrait everywhere. app.json's orientation is now "default"
   // (required so iOS will PERMIT rotation at all), and we hold portrait at
   // startup — the trailer player is the one place that unlocks, then re-locks
@@ -50,38 +66,91 @@ export default function RootLayout() {
     loadPrefs();
   }, []);
 
+  // Hold the first frame until the faces are ready, so text never paints in the
+  // system font and then reflows. Gated on `|| fontError` deliberately: if a file
+  // fails to load we degrade to the system face rather than hanging on a blank
+  // screen forever.
+  if (!fontsLoaded && !fontError) return null;
+
   return (
     // GestureHandlerRootView must wrap the app so gesture-handler receives touches
     // (swipe-to-reveal on take cards, the nav's presses). FavoritesProvider loads
-    // the on-device favorites once and shares them app-wide.
+    // the on-device favorites once and shares them app-wide; RecentSearchesProvider
+    // does the same for the Search tab's recents ledger — at the ROOT, because the
+    // entity destination pages are pushed routes that live outside (tabs).
     <GestureHandlerRootView style={{ flex: 1 }}>
       <FavoritesProvider>
-        <StatusBar hidden={false} />
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          {/* Detail is presented as a sheet/modal over the list (no full-page push) —
-              on iOS this is the card-over-list look; swipe down or the close button dismisses. */}
-          <Stack.Screen
-            name="movie/[id]"
-            options={{
-              headerShown: false,
-              presentation: "modal",
-              gestureEnabled: true,
-              animation: "slide_from_bottom",
-            }}
-          />
-          {/* Universe's sky, live — NOT Discover. Pushed full-screen from the
-              Home dashboard so the same constellation simply comes alive; the
-              ✕ dismisses it. Discover is a real tab and lives elsewhere. */}
-          <Stack.Screen
-            name="explore"
-            options={{
-              headerShown: false,
-              presentation: "fullScreenModal",
-              animation: "fade",
-            }}
-          />
-        </Stack>
+        <RecentSearchesProvider>
+        {/* EntityOverlayProvider holds the entity-page REQUEST only — the layer
+            itself (EntityOverlayHost) is rendered inside the search screen, under
+            the nav pill, so the pill stays available on entity pages and the page
+            survives tab switches. The provider sits here so the nav bar can read
+            `isOpen` and any screen can open a page. See EntityOverlayContext. */}
+        <EntityOverlayProvider>
+          <StatusBar hidden={false} />
+          <Stack>
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            {/* Detail is presented as a sheet/modal over the list (no full-page push) —
+                on iOS this is the card-over-list look; swipe down or the close button dismisses. */}
+            <Stack.Screen
+              name="movie/[id]"
+              options={{
+                headerShown: false,
+                presentation: "modal",
+                gestureEnabled: true,
+                animation: "slide_from_bottom",
+              }}
+            />
+            {/* LEGACY ROUTES — search does not push these any more. The entity pages
+                are presented by EntityOverlayProvider (above), because THREE
+                route-based attempts at the marquee grow (fade, transparentModal,
+                containedTransparentModal) all stayed intermittently wrong the same
+                way: a native screen presentation is OS-owned, and "animation: none"
+                is a request it sometimes declines. The routes stay for URL
+                navigation and deep links; they render the same EntityScreen with no
+                origin, so they simply appear. The transparent contentStyle stays
+                because react-navigation's default screen background is opaque WHITE. */}
+            <Stack.Screen
+              name="person/[id]"
+              options={{
+                headerShown: false,
+                presentation: "containedTransparentModal",
+                animation: "none",
+                contentStyle: { backgroundColor: "transparent" },
+              }}
+            />
+            <Stack.Screen
+              name="collection/[id]"
+              options={{
+                headerShown: false,
+                presentation: "containedTransparentModal",
+                animation: "none",
+                contentStyle: { backgroundColor: "transparent" },
+              }}
+            />
+            <Stack.Screen
+              name="company/[id]"
+              options={{
+                headerShown: false,
+                presentation: "containedTransparentModal",
+                animation: "none",
+                contentStyle: { backgroundColor: "transparent" },
+              }}
+            />
+            {/* Universe's sky, live — NOT Discover. Pushed full-screen from the
+                Home dashboard so the same constellation simply comes alive; the
+                ✕ dismisses it. Discover is a real tab and lives elsewhere. */}
+            <Stack.Screen
+              name="explore"
+              options={{
+                headerShown: false,
+                presentation: "fullScreenModal",
+                animation: "fade",
+              }}
+            />
+          </Stack>
+        </EntityOverlayProvider>
+        </RecentSearchesProvider>
       </FavoritesProvider>
     </GestureHandlerRootView>
   );
