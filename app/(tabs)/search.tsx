@@ -47,6 +47,7 @@ import KindRow, { KIND_ROW_LABEL, KIND_UNIT, ROW_KINDS } from "@/components/sear
 import ZeroResults from "@/components/search/ZeroResults";
 import { FONT, SEARCH_LAYOUT, SIGNAL, TRACK, groundAlpha } from "@/constants/signal";
 import { useRecentSearches } from "@/contexts/RecentSearchesContext";
+import { updateSearchCount } from "@/services/appwrite";
 import { useBoolPref } from "@/hooks/useBoolPref";
 import {
   PREF_ANCHOR_GUIDE,
@@ -817,6 +818,12 @@ export default function SearchScreen() {
     [router, openOverlay, collapseIsland]
   );
 
+  /** ▸ THE LEDGER'S TAP GUARD — one write per THING per search session (Bryan's
+   *  rule, 2026-08-10: "within one search, every distinct thing you open counts
+   *  once; nothing counts twice until it's a new search"). Keys are
+   *  `${resultsQuery}|${kind}:${id}`; cleared with the door, so re-running the
+   *  same search later counts fresh. */
+  const countedTapsRef = useRef(new Set<string>());
   const onPickResult = useCallback(
     (r: SearchResult, rect?: MarqueeRect, remeasure?: MarqueeRemeasure) => {
       // NAVIGATE FIRST, RECORD LATER. `commit` writes SQLite and re-renders the whole
@@ -826,10 +833,32 @@ export default function SearchScreen() {
       // when the ledger actually updates is invisible to the user.
       // Captured NOW, not read inside the timeout — see `commit`.
       const sessionId = sessionIdRef.current;
+      // ▸ THE MOST-SEARCHED LEDGER WRITES HERE — on the CLICK, never on the guess
+      // (Bryan, 2026-08-10). The old submit-time write recorded the ranker's #1:
+      // he searched JURASSIC wanting the collection, and the ledger logged
+      // Jurassic World Rebirth. A tap is the user announcing intent themselves,
+      // so the tap is the write. Every route into content from a search — typing
+      // rows, the hero's DETAILS, did-you-mean suggestions — lands here, and
+      // nothing else does: recents tiles and ONE PICK are history, not search.
+      // Guard checked NOW (synchronous, catches double-taps); the network
+      // dispatch rides the same deferral as `commit`.
+      const ledgerKey = `${resultsQuery}|${r.entityType}:${r.id}`;
+      const countThis = !countedTapsRef.current.has(ledgerKey);
+      if (countThis) countedTapsRef.current.add(ledgerKey);
       openEntity(r.entityType, r.id, { imagePath: r.imagePath, title: r.title, rect, remeasure });
-      setTimeout(() => commit(r, sessionId), 600);
+      setTimeout(() => {
+        commit(r, sessionId);
+        if (countThis)
+          void updateSearchCount(resultsQuery, {
+            entityType: r.entityType,
+            id: r.id,
+            title: r.title,
+            year: r.year,
+            imagePath: r.imagePath,
+          });
+      }, 600);
     },
-    [commit, openEntity]
+    [commit, openEntity, resultsQuery]
   );
 
   /**
@@ -1020,6 +1049,8 @@ export default function SearchScreen() {
     if (!doorShown) {
       setResultsFilter(SEARCH_FILTER_DEFAULTS);
       rescuedForRef.current = "";
+      // A fresh search session counts fresh — see THE LEDGER'S TAP GUARD.
+      countedTapsRef.current.clear();
     }
   }, [doorShown, setResultsFilter, noteResultsScroll]);
 
