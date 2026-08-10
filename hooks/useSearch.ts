@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Keyboard, Platform } from "react-native";
 
 import { useSearchIsland } from "@/contexts/SearchIslandContext";
-import { updateSearchCount } from "@/services/appwrite";
 import {
   searchEntities,
   enrichSubmitted,
@@ -99,10 +98,6 @@ export function useSearch(): SearchState {
   // Which result set has already been enriched / had suggestions fetched. Reset
   // inside run()'s success handler, because a new result set invalidates both.
   const enrichedForRef = useRef("");
-  // Which query has already been counted in the most-searched ledger. NOT reset
-  // on new results — dismissing and re-raising the keyboard over the same query
-  // is one search, not two.
-  const countedForRef = useRef("");
   const suggestedForRef = useRef("");
 
   /**
@@ -257,27 +252,11 @@ export function useSearch(): SearchState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [submitted, phase, resultsQuery]);
 
-  // THE MOST-SEARCHED LEDGER (services/appwrite.ts) — counted at the same moment
-  // enrichment pays: query submitted, results in hand, once per query. Both roads
-  // into `submitted` count on purpose — the Search key and the keyboard dismissal
-  // both mean "I stopped typing and looked at these". Fire-and-forget: two
-  // Appwrite requests, zero TMDB, and a failed write costs nothing but the count.
-  useEffect(() => {
-    if (!submitted || phase !== "results") return;
-    if (countedForRef.current === resultsQuery) return;
-    countedForRef.current = resultsQuery;
-    const top = results[0];
-    if (!top) return;
-    void updateSearchCount(resultsQuery, {
-      entityType: top.entityType,
-      id: top.id,
-      title: top.title,
-      year: top.year,
-      imagePath: top.imagePath,
-    });
-    // `results` deliberately absent — same reasoning as the enrichment effect above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [submitted, phase, resultsQuery]);
+  // (The most-searched ledger used to write here, at the submit moment — recording
+  // the ranker's #1 guess. Bryan killed that 2026-08-10 after JURASSIC logged
+  // Rebirth while he was choosing the Jurassic Park Collection: the write now
+  // lives on the TAP, in search.tsx's onPickResult, where intent is announced
+  // rather than inferred.)
 
   // DID YOU MEAN. Truncate-and-retry costs 1–3 requests, and they are spent only
   // here — at the one moment the user has nothing, which is when an extra request
