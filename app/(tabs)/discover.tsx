@@ -38,7 +38,7 @@ import {
   fetchCashCowMovies,
   fetchMoneyPitMovies,
 } from "@/services/api";
-import { getTrendingMovies, updateSearchCount } from "@/services/appwrite";
+import { getTrendingMovies } from "@/services/appwrite";
 import { useNavMorph } from "@/contexts/NavMorphContext";
 import { images } from "@/constants/images";
 
@@ -189,20 +189,10 @@ const Search = () => {
     return () => clearTimeout(timeoutId);
   }, [searchQuery]);
 
-  useEffect(() => {
-    if (searchResults?.length! > 0 && searchResults?.[0]) {
-      // Legacy tab, movies only — adapted to the revived ledger's shape
-      // (services/appwrite.ts). This tab stored POSTER paths and still does.
-      const top = searchResults[0];
-      updateSearchCount(searchQuery, {
-        entityType: "movie",
-        id: top.id,
-        title: top.title,
-        year: top.release_date ? top.release_date.slice(0, 4) : null,
-        imagePath: top.poster_path ?? null,
-      });
-    }
-  }, [searchResults]);
+  // (This tab used to write the most-searched ledger here — the top result at
+  // type-time, a guess. The ledger went click-recorded 2026-08-10 (see
+  // services/appwrite.ts) and this legacy tab lost its pen: it still READS the
+  // trending row, it just no longer pollutes it.)
 
   const openSearch = useCallback(() => setSearchOpen(true), []);
   const closeSearch = useCallback(() => {
