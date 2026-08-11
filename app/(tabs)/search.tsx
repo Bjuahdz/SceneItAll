@@ -247,6 +247,7 @@ export default function SearchScreen() {
     suggestions,
     keyboardUp,
     clear,
+    pricing,
   } = useSearch();
   // The results carry their own query stamp. Using it — rather than trusting that
   // `results` must belong to the live query — is the whole reason it exists: rows
@@ -818,11 +819,19 @@ export default function SearchScreen() {
       // START THE REQUESTS NOW, on the tap — the page reuses this exact promise, so
       // the fetch runs alongside the grow instead of after it.
       prefetchEntity(kind, id);
-      // Entity pages get the nav back (Bryan, 2026-08-01): the field folds to a
-      // disc and the tab pill unfolds, so every destination is one tap from a
-      // reading surface. Same commit as the overlay request — one render carries
-      // both, and the nav's spring runs on the UI thread alongside the grow.
-      collapseIsland();
+      // ▸ THE NAV'S HANDOVER RIDES THE GROW. `collapseIsland()` used to run right
+      // here, same commit as the overlay request — and the FILTER pill arrived
+      // before the grow had visibly begun (the pre-flight measure frames put the
+      // sweep ahead of any motion; Bryan: "too early, before the transition").
+      // Deferring it to the grow's END overshot the other way ("too late, as if
+      // delayed"). It now runs from the grow's FIRST MOTION FRAME — onGrowStart
+      // on the EntityOverlayHost below, the mirror of onFoldStart — so the nav's
+      // handover spring and the grow run together and land together ("at the
+      // same time, instead of waiting on either end"). One commit still flips
+      // the whole pose, which is what keeps the grow+filterGrow mirror identity
+      // (the nav's `squeeze`) from pumping the bar. Pages with no origin fire it
+      // at mount; a page closed mid-grow never fires it, and the island simply
+      // stays expanded — correct, because you are back on the search.
       openOverlay({
         kind,
         id,
@@ -837,7 +846,7 @@ export default function SearchScreen() {
         remeasureOrigin: art?.rect && art.imagePath ? art.remeasure : undefined,
       });
     },
-    [router, openOverlay, collapseIsland]
+    [router, openOverlay]
   );
 
   /** ▸ THE LEDGER'S TAP GUARD — one write per THING per search session (Bryan's
@@ -1259,6 +1268,30 @@ export default function SearchScreen() {
       : kindCounts[resultsFilter.kind] ?? null;
     const mastheadUnit = KIND_UNIT[resultsFilter.kind];
 
+    /* ── PRICING THE CATALOGUE — skeletons rather than an order about to change.
+       STUDIOS and COLLECTIONS arrive with no ranking signal at all, so the moment
+       you land on one of those tabs their counts are bought and the list is
+       re-seated by catalogue size (see useSearch's pricing effect). Painting the
+       rows first would show TMDB's coin-toss order — the wrong studio on top — and
+       then visibly re-order and drop shells under the reader's eyes. The kind row
+       stays live throughout, so the wait is never a trap. Films, shows and people
+       never reach here: they cost nothing and paint instantly.
+
+       ⚠ SUBMITTED ONLY, on purpose. Pricing also runs while TYPING now (the gate
+       is the kind, not the keyboard — see useSearch), but this branch must not
+       catch that case: the typing ladder's contract is rows held across
+       re-fetches, never blanked under the caret. There the order corrects in
+       place a beat after the counts land, which mid-typing reads as settling. */
+    if (submitted && resultsMatchQuery && pricing) {
+      return (
+        <Animated.View exiting={LIST_EXIT}>
+          <QueryEcho query={query} count={null} unit={mastheadUnit} />
+          <KindRow value={resultsFilter.kind} onChange={setKind} counts={kindCounts} />
+          <SkeletonRows />
+        </Animated.View>
+      );
+    }
+
     /* ── FILTERED TO NOTHING IS A STATE, NOT A DEAD END (Bryan, 2026-08-08). ────
        The old branch condition (`shownResults.length > 0`) unmounted the ENTIRE
        submitted state when a filter emptied the list — masthead, kind row and all —
@@ -1592,7 +1625,13 @@ export default function SearchScreen() {
           rendered by the tab navigator after all screen content, so it outranks
           this by construction. Living inside the screen is also what keeps an open
           page alive across tab switches. See EntityOverlayContext. */}
-      <EntityOverlayHost onClose={foldClosed} onFoldStart={openIsland} />
+      <EntityOverlayHost
+        onClose={foldClosed}
+        onFoldStart={openIsland}
+        // The grow's first motion frame — the nav trades the field for the
+        // FILTER pose alongside it, landing together. See the note in openEntity.
+        onGrowStart={collapseIsland}
+      />
 
       {/* The FILTER sheet, mounted beside the page it filters and ABOVE it —
           it grows out of the nav's pill, which is why the bar stands aside for
