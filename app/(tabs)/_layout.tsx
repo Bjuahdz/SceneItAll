@@ -18,6 +18,9 @@ import Svg, { Path } from "react-native-svg";
 import Animated, {
   Easing,
   interpolate,
+  runOnJS,
+  useAnimatedProps,
+  useAnimatedReaction,
   useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
@@ -52,6 +55,14 @@ import {
   type TabName,
 } from "@/contexts/SearchIslandContext";
 import { useEntityOverlay } from "@/contexts/EntityOverlayContext";
+import {
+  useMovieSheet,
+  RECEDE_SCALE,
+  RECEDE_RADIUS,
+  RECEDE_BLUR,
+  FROST_STOPS,
+  FROST_RESPONSE,
+} from "@/contexts/MovieSheetContext";
 import { SIGNAL, accentAlpha, inkAlpha } from "@/constants/signal";
 import {
   FILTER_DEFAULTS,
@@ -1597,10 +1608,114 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
   );
 }
 
+/**
+ * THE RECEDE STAGE — the background half of the movie sheet's card-stack look.
+ *
+ * When the movie sheet presents (a transparent route drawn over this screen),
+ * everything under it — whichever tab, an open entity page, the nav pill —
+ * recedes as ONE card: scales down toward RECEDE_SCALE, drops so its top parks
+ * at the status bar's foot, takes RECEDE_RADIUS corners and dims. All of it is
+ * a pure function of the sheet's own `progress` shared value, so the card and
+ * the sheet move on one clock and cannot disagree, including under a finger.
+ *
+ * ⚠ THE REST POSE CARRIES NO TRANSFORM AT ALL — not even a scale of 1. This
+ * file already learned that lesson on the FILTER island: a UIVisualEffectView
+ * under a scaled ancestor stops sampling its backdrop and renders as tint
+ * alone, and this wrapper is an ancestor of EVERY BlurView in the tab tree.
+ * So at progress 0 the worklet returns an empty transform and the glass keeps
+ * its frost; while a sheet is up the card's glass degrades to tint, which the
+ * frost covers and the sheet mostly hides.
+ *
+ * THE FROST (Bryan 2026-08-12: the parked card must not look DARK — a black
+ * dim was here first and was ruled out): a BlurView whose intensity rides the
+ * same progress value. It lives OUTSIDE the scaled card — a sibling above it —
+ * for the same scar reason: inside the card it would be glass under a scaled
+ * ancestor and render as nothing. Out here it is untransformed and samples the
+ * scaled card beneath it, so the frost genuinely thickens as the card recedes
+ * and thins under a finger dragging the sheet home.
+ */
+const AnimatedBlurView = Animated.createAnimatedComponent(BlurView);
+
+function RecedeStage({ children }: { children: React.ReactNode }) {
+  const { progress } = useMovieSheet();
+  const insets = useSafeAreaInsets();
+  // Plain number for the worklet: the receded card's top lands where the
+  // status bar ends, exactly like the native card stack parks it.
+  const drop = insets.top;
+
+  // ▸ WHY THE CARD RASTERIZES WHILE A SHEET IS UP (Bryan, 2026-08-12: "all the
+  // text behind it is super pixelated ... only when I returned to the default
+  // state did it get to the high fidelity"). A scaled card is LIVE content:
+  // every glyph is re-sampled through the fractional scale on every frame, and
+  // thin high-contrast letterforms — this app's 10–12px tracked caps — alias
+  // badly under that, while photos (soft, continuous) survive. Rasterizing
+  // captures the subtree ONCE at full screen scale and lets the GPU minify the
+  // BITMAP, which is smooth — a screenshot scaled to 0.92 looks fine where live
+  // text at 0.92 looks jagged. It is what UIKit's own card stack does.
+  //
+  // It must be OFF at rest: a rasterized layer re-captures on every content
+  // change, so a scrolling tab would pay a full-screen capture per frame for
+  // nothing. One render at each pose change flips it (the `settled` philosophy
+  // — a pose is React's business, a frame is not). While a sheet is up the tab
+  // tree underneath is static, so the capture is taken once and the drag then
+  // moves a cached bitmap; the corner radius plateaus past progress 0.3, so
+  // even that stops invalidating the cache through the drag range.
+  const [sheetUp, setSheetUp] = useState(false);
+  useAnimatedReaction(
+    () => progress.value > 0.001,
+    (up, prev) => {
+      if (prev === null || up !== prev) runOnJS(setSheetUp)(up);
+    },
+    []
+  );
+  const cardStyle = useAnimatedStyle(() => {
+    const p = progress.value;
+    if (p === 0) {
+      // Identity — no transform in the render tree, see the blur note above.
+      return { borderRadius: 0, transform: [] };
+    }
+    return {
+      // The radius arrives early (like iOS's own recede) rather than riding p
+      // linearly — by the time the card has visibly detached it is already a
+      // card, and on the way back the corners melt into the device's contour
+      // over the last stretch of travel (the Plex square→round read).
+      borderRadius: interpolate(p, [0, 0.3], [0, RECEDE_RADIUS], "clamp"),
+      transform: [{ translateY: p * drop }, { scale: 1 - p * (1 - RECEDE_SCALE) }],
+    };
+  });
+  // The frost rides its RESPONSE CURVE, not the raw clock — see FROST_STOPS /
+  // FROST_RESPONSE in the context: most of the defocus sheds in the first
+  // stretch of a pull, and lands late on the way back up.
+  const frostProps = useAnimatedProps(() => ({
+    intensity: RECEDE_BLUR * interpolate(progress.value, FROST_STOPS, FROST_RESPONSE, "clamp"),
+  }));
+  return (
+    <View style={styles.recedeBacking}>
+      <Animated.View
+        style={[styles.recedeCard, cardStyle]}
+        shouldRasterizeIOS={sheetUp}
+        renderToHardwareTextureAndroid={sheetUp}
+      >
+        {children}
+      </Animated.View>
+      <AnimatedBlurView
+        // "default" keeps the frost neutral — "dark" would re-darken the card the
+        // ruling just un-darkened, "light" goes milky over this app's ground.
+        tint="default"
+        experimentalBlurMethod="dimezisBlurView"
+        animatedProps={frostProps}
+        style={styles.recedeFrost}
+        pointerEvents="none"
+      />
+    </View>
+  );
+}
+
 export default function TabsLayout() {
   return (
     <NavMorphProvider>
       <SearchIslandProvider>
+      <RecedeStage>
       <Tabs tabBar={(props) => <FloatingTabBar {...props} />} screenOptions={{ headerShown: false }}>
         {/* Declaration order IS the order of seats in the pill. Slates sits last
             on purpose: its label is the shortest, so any slack it leaves falls at
@@ -1611,12 +1726,24 @@ export default function TabsLayout() {
         <Tabs.Screen name="slate" options={{ title: "Slates" }} />
         <Tabs.Screen name="search" options={{ title: "Search" }} />
       </Tabs>
+      </RecedeStage>
       </SearchIslandProvider>
     </NavMorphProvider>
   );
 }
 
 const styles = StyleSheet.create({
+  /** Behind the receding card: the black the Plex gutters show. Without this the
+   *  native screen's own background (react-navigation's opaque WHITE — see the
+   *  root layout's entity-route note) would flash around the shrinking card. */
+  recedeBacking: { flex: 1, backgroundColor: "#000" },
+  /** The card the whole tab tree becomes while a movie sheet is up. Scales about
+   *  its top edge so `translateY` speaks plainly ("drop by the status bar"), and
+   *  clips so the animated corner radius actually cuts the content. */
+  recedeCard: { flex: 1, overflow: "hidden", transformOrigin: "top" },
+  /** The frost over the receding card — a SIBLING of the card, not a child
+   *  (glass under the card's scale would stop sampling; see RecedeStage). */
+  recedeFrost: { ...StyleSheet.absoluteFillObject },
   /** Holds the two crossfading pill labels on one baseline. The count is absolute so
    *  it cannot widen the row as it arrives — a pill that resized mid-sink would be
    *  the layout animation this whole approach exists to avoid.

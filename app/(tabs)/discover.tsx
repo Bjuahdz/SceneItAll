@@ -18,13 +18,14 @@ import {
 } from "react-native";
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
+import MaskedView from "@react-native-masked-view/masked-view";
 import { Ionicons } from "@expo/vector-icons";
 import Animated, {
   FadeInDown,
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
   interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -40,6 +41,7 @@ import {
 } from "@/services/api";
 import { getTrendingMovies } from "@/services/appwrite";
 import { useNavMorph } from "@/contexts/NavMorphContext";
+import { groundAlpha } from "@/constants/signal";
 import { images } from "@/constants/images";
 
 import HeroPoster from "@/components/homepage/HeroPoster";
@@ -55,12 +57,33 @@ const ACCENT = "#9ccadf";
 // keyboard (it's anchored near the top).
 const POPUP_LIST_MAX_HEIGHT = 340;
 
-// Scroll distance before the readability blur fades in (keeps controls legible once
-// content scrolls under the gradient scrim).
-const SCROLL_BLUR_Y = 28;
+// ── The top-edge glass (replaced the old header card, Bryan 2026-08-12) ──────
+// The matte's SOLID band runs the status bar plus this much — through the media
+// tabs' block (paddingTop 4 + label-to-underline ~34), and no further. The first
+// cut carried the header's air too (56) and read as a wall over the hero; with
+// the air trimmed and the ramp tightened the band is ~20% shorter end to end.
+const EDGE_SOLID_PAST_INSET = 40;
+// The ramp's fixed length below the solid band — same rule as the recents band:
+// a fixed distance, not a percentage, so the softness never changes.
+const EDGE_FADE = 28;
+// How much scroll it takes the band to materialize once the hero's tail nears
+// the chrome — a fade distance, not a switch, so it arrives as weather.
+const EDGE_APPEAR_RAMP = 60;
 
-// Header collapse tuning: keep the media tabs visible near the very top, and ignore
-// sub-pixel jitter so the fold only reacts to deliberate scrolls.
+// ▸ THE COLLAPSED POSE (Bryan, 2026-08-12: the folded band should be
+// "significantly smaller — or just give me configuration knobs"). This is the
+// TOTAL height of glass left on screen while the tabs are folded, measured from
+// the very top of the screen — status bar included, so it is an absolute pose,
+// not an offset from the tab math. The band slides between full and this on the
+// fold's own 220ms clock (a translation — a mounted BlurView must never resize).
+// 48 is ~45% shorter than the previous folded pose on a Dynamic-Island phone.
+// Values smaller than the status-bar inset pull the ramp up under the clock
+// itself; bigger values leave more frosted headroom.
+const EDGE_FOLDED_H = 75;
+
+// Header collapse tuning (deleted 2026-08-12, restored the same day by Bryan's
+// reversal): keep the media tabs visible near the very top, and ignore sub-pixel
+// jitter so the fold only reacts to deliberate scrolls.
 const TABS_ALWAYS_SHOWN_Y = 16;
 const SCROLL_DEAD_ZONE = 6;
 
@@ -93,9 +116,10 @@ const MEDIA_TYPES = [
 
 /**
  * Header content: a centered Movies / Shows / Books toggle (Movies active; Shows/Books
- * are reserved "Soon" scaffolds). The toggle lives in a collapsible wrapper so it
- * can still fold away on scroll. Search left this page entirely — it lives in the
- * nav's search island now.
+ * are reserved "Soon" scaffolds). The toggle lives in a collapsible wrapper: it folds
+ * away on scroll-down and returns on scroll-up. (Deleted 2026-08-12, restored the same
+ * day on Bryan's reversal — and the glass band now rides the SAME fold value, so tabs
+ * and glass leave and return as one thing.) Search lives in the nav's island.
  */
 function SearchEntry({
   tabsStyle,
@@ -201,20 +225,31 @@ const Search = () => {
     reset();
   }, [reset]);
 
-  // Two scroll-driven effects, both fed by one plain JS onScroll (useAnimatedScrollHandler
-  // doesn't fire in this env). Each only writes a SharedValue when its state actually
-  // changes — no per-frame work, no React re-renders; the animations run on the UI thread.
+  // The scroll drives the header from one plain JS onScroll. Two facts come out
+  // of it, each written only when it changes or per-frame into a shared value —
+  // no React re-renders mid-scroll:
   //
-  // 1) Readability blur: fade the frosted layer in once content scrolls under the scrim.
-  const headerBlur = useSharedValue(0);
-  const scrolledRef = useRef(false);
-  const headerBlurStyle = useAnimatedStyle(() => ({ opacity: headerBlur.value }));
+  // ▸ THE BAND IS GATED PAST THE HERO (Bryan, 2026-08-12, second round: constant
+  // glass over the hero was "way too obstructive... it should only really appear
+  // when we get past this section"). The hero wrapper MEASURES itself, so "past
+  // this section" is the same moment on every device — no hardcoded hero height.
+  // The band fades in over EDGE_APPEAR_RAMP of scroll, finishing exactly when the
+  // hero's tail passes the band's own bottom — the frame non-hero content starts
+  // sliding under the chrome and the tabs first need the help.
+  //
+  // ▸ THE FOLD (deleted, then restored by Bryan's reversal the same day): the
+  // media tabs fold away on scroll-down and return on scroll-up — and the glass
+  // band rides the SAME `tabsHidden` value, translating up by exactly the room
+  // the folded tabs give back. One clock, so the tabs and their glass leave and
+  // return as one thing. A TRANSLATION, never a resize: a mounted BlurView must
+  // keep its size (resizing re-samples every frame — the recents band's scar),
+  // and sliding the band up shortens what's on screen just the same.
+  const scrollY = useSharedValue(0);
+  const heroBottom = useSharedValue(0); // hero section's bottom edge, content coords
 
-  // 2) Collapsing tabs: fold the media toggle away on scroll-down, reveal on scroll-up.
   const tabsHidden = useSharedValue(0);
   const tabsHiddenRef = useRef(false);
   const lastScrollYRef = useRef(0);
-
   const setTabsHidden = useCallback(
     (hide: boolean) => {
       if (hide === tabsHiddenRef.current) return;
@@ -226,33 +261,33 @@ const Search = () => {
 
   const handleScroll = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-      // Feed the floating nav's morph first — it keeps its own intent thresholds.
-      navScroll(e);
+      navScroll(e); // the nav pill's morph keeps its own intent thresholds
 
       const y = e.nativeEvent.contentOffset.y;
+      scrollY.value = y;
       const dy = y - lastScrollYRef.current;
       lastScrollYRef.current = y;
 
-      // Blur in/out across a fixed threshold.
-      const blurred = y > SCROLL_BLUR_Y;
-      if (blurred !== scrolledRef.current) {
-        scrolledRef.current = blurred;
-        headerBlur.value = withTiming(blurred ? 1 : 0, { duration: 200 });
-      }
-
-      // Tabs: always shown near the top, otherwise fold by scroll direction (with a
-      // small dead-zone so tiny jitters don't toggle it).
+      // Tabs: always shown near the top, otherwise fold by scroll direction (with
+      // a small dead-zone so tiny jitters don't toggle it).
       if (y <= TABS_ALWAYS_SHOWN_Y) {
         setTabsHidden(false);
       } else if (Math.abs(dy) >= SCROLL_DEAD_ZONE) {
         setTabsHidden(dy > 0);
       }
     },
-    [headerBlur, setTabsHidden, navScroll]
+    [navScroll, scrollY, setTabsHidden]
+  );
+  const onHeroLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { y, height } = e.nativeEvent.layout;
+      if (height > 0) heroBottom.value = y + height;
+    },
+    [heroBottom]
   );
 
-  // Measure the tabs' natural height once so the fold can interpolate it → 0 without a
-  // hardcoded magic number (stays correct across font scales / devices).
+  // Measure the tabs' natural height once so the fold can interpolate it → 0 (and
+  // the band can translate by the same room) without a hardcoded magic number.
   const tabsNatHeight = useSharedValue(0);
   const onTabsLayout = useCallback(
     (e: LayoutChangeEvent) => {
@@ -271,6 +306,21 @@ const Search = () => {
     };
   });
 
+  // Plain numbers for the worklet: the band's full height on this device, and
+  // how far it must slide up so exactly EDGE_FOLDED_H of it stays on screen.
+  const bandH = insets.top + EDGE_SOLID_PAST_INSET + EDGE_FADE;
+  const foldedLift = EDGE_FOLDED_H - bandH; // negative — upward
+  const edgeStyle = useAnimatedStyle(() => {
+    if (heroBottom.value === 0) return { opacity: 0 }; // unmeasured → hero is up → hidden
+    const fullAt = heroBottom.value - bandH;
+    return {
+      opacity: interpolate(scrollY.value, [fullAt - EDGE_APPEAR_RAMP, fullAt], [0, 1], "clamp"),
+      // Slides between the full pose and the configured collapsed pose on the
+      // fold's own value — tabs and glass still leave and return as one thing.
+      transform: [{ translateY: foldedLift * tabsHidden.value }],
+    };
+  });
+
   // The home discovery layout, preserved full-bleed (no in-flow search chrome).
   const DiscoveryContent = useCallback(
     () => (
@@ -282,8 +332,9 @@ const Search = () => {
         onScroll={handleScroll}
         scrollEventThrottle={16}
       >
-        {/* Hero Poster Section */}
-        <View className="-mx-5" style={{ marginTop: -20 }}>
+        {/* Hero Poster Section — measures itself so the glass band knows where
+            "past the hero" begins on this device. */}
+        <View className="-mx-5" style={{ marginTop: -20 }} onLayout={onHeroLayout}>
           {nowPlayingMovies && <MemoizedHeroPoster movies={nowPlayingMovies} />}
         </View>
 
@@ -385,6 +436,7 @@ const Search = () => {
       adventureMovies,
       familyMovies,
       handleScroll,
+      onHeroLayout,
     ]
   );
 
@@ -404,31 +456,58 @@ const Search = () => {
         <DiscoveryContent />
       )}
 
-      {/* Seamless header: pinned full-bleed to the top, revealed on load with a slide-down.
-          A top-down gradient scrim (dark → transparent, no hard edge) melts it into the
-          hero behind it; a blur fades in on scroll for readability. Its media tabs fold
-          away as you scroll down (search bar stays). It never overlaps the bottom nav. */}
+      {/* ▸ THE TOP EDGE — the app's standard alpha-masked glass (the recents
+          masthead's construction, see search.tsx; EntityHero carries the same),
+          replacing this page's original chrome: a rounded card with a hard-cut
+          BlurView and a dark gradient band whose bottom edge was always findable.
+          A MaskedView whose matte is solid across the status bar + tabs and then
+          ramps to transparent wraps a fixed-intensity blur and a ground tint, so
+          the blur and the tint dissolve TOGETHER — no edge where the treatment
+          stops, nothing to round off or hide.
+
+          GATED PAST THE HERO — see edgeStyle above: invisible while the hero owns
+          the screen (the tabs read fine over the poster's own dark top), fading
+          in as the hero's tail reaches the chrome, full once ordinary content is
+          what slides beneath the tabs. Fixed size, mounted once, only OPACITY
+          animates — the BlurView scars (zero-size birth, per-frame resize) still
+          cannot apply. */}
+      <Animated.View
+        style={[styles.edge, { height: insets.top + EDGE_SOLID_PAST_INSET + EDGE_FADE }, edgeStyle]}
+        pointerEvents="none"
+      >
+        <MaskedView
+          style={StyleSheet.absoluteFill}
+          maskElement={
+            <View style={StyleSheet.absoluteFill}>
+              <View style={{ height: insets.top + EDGE_SOLID_PAST_INSET, backgroundColor: "#000" }} />
+              <LinearGradient colors={["#000", "transparent"]} style={{ flex: 1 }} />
+            </View>
+          }
+        >
+          <BlurView
+            intensity={22}
+            tint="systemUltraThinMaterialDark"
+            experimentalBlurMethod="dimezisBlurView"
+            style={StyleSheet.absoluteFill}
+          />
+          {/* The blur alone leaves bright artwork bright. The tint is what makes the
+              band read as the page's own ground closing over the content. */}
+          <LinearGradient
+            colors={[groundAlpha(0.22), groundAlpha(0.4), groundAlpha(0)]}
+            locations={[0, 0.55, 1]}
+            style={StyleSheet.absoluteFill}
+          />
+        </MaskedView>
+      </Animated.View>
+
+      {/* Header content: pinned full-bleed, revealed on load with a slide-down.
+          Its media tabs fold away on scroll-down and return on scroll-up, and the
+          glass band above follows the same fold. */}
       <Animated.View
         entering={FadeInDown.duration(220)}
         style={[styles.stickyHeader, { paddingTop: insets.top + 4 }]}
         pointerEvents="box-none"
       >
-        {/* Frosted layer — invisible at the top (hero blends through the scrim), fades in
-            once you scroll so the controls stay readable over content. */}
-        <Animated.View style={[StyleSheet.absoluteFill, headerBlurStyle]} pointerEvents="none">
-          <BlurView
-            intensity={30}
-            tint="dark"
-            experimentalBlurMethod="dimezisBlurView"
-            style={StyleSheet.absoluteFill}
-          />
-        </Animated.View>
-        <LinearGradient
-          colors={["rgba(0,0,0,0.82)", "rgba(0,0,0,0.2)", "rgba(0,0,0,0.0)", "rgba(0,0,0,0)"]}
-          locations={[0, 0.65, 0.8, 1]}
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
         <SearchEntry tabsStyle={tabsStyle} onTabsLayout={onTabsLayout} />
       </Animated.View>
 
@@ -497,18 +576,24 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.55)",
     fontSize: 13,
   },
+  // The masked glass band. OUTSIDE the header's own box so its ramp can run past
+  // the content without an overflow game; under the header in z so the tabs are
+  // never blurred by their own bar. Its height is inline (it needs insets.top).
+  edge: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 39,
+  },
   stickyHeader: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
     zIndex: 40,
-    overflow: "hidden",
-    // Round ONLY the bottom corners — the top + sides stay flush to the screen so it
-    // reads as a header that melts into the hero, not a detached card. Full-width +
-    // fixed radius = the same look on every screen width.
-    borderBottomLeftRadius: 28,
-    borderBottomRightRadius: 28,
+    // No rounded corners, no overflow clipping — the old card silhouette existed
+    // to give the hard-edged treatment somewhere to end. The mask has no edge.
   },
 
   // --- Search popup ---

@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useFonts } from "expo-font";
 import { EntityOverlayProvider } from "@/contexts/EntityOverlayContext";
+import { MovieSheetProvider } from "@/contexts/MovieSheetContext";
 import { FavoritesProvider } from "@/contexts/FavoritesContext";
 import { RecentSearchesProvider } from "@/contexts/RecentSearchesContext";
 import { initEnrichment } from "@/services/enrichment";
@@ -87,18 +88,30 @@ export default function RootLayout() {
             survives tab switches. The provider sits here so the nav bar can read
             `isOpen` and any screen can open a page. See EntityOverlayContext. */}
         <EntityOverlayProvider>
+        {/* MovieSheetProvider carries the movie sheet's presentation clock — one
+            shared value the /movie route writes and the (tabs) recede stage reads,
+            so the sheet's travel and the old screen's recede can never disagree.
+            See contexts/MovieSheetContext. */}
+        <MovieSheetProvider>
           <StatusBar hidden={false} />
           <Stack>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            {/* Detail is presented as a sheet/modal over the list (no full-page push) —
-                on iOS this is the card-over-list look; swipe down or the close button dismisses. */}
+            {/* The movie detail SHEET. Transparent + no OS animation, because the
+                app draws this presentation itself: the route's content slides up as
+                a rounded card while the screen underneath recedes in step (the
+                card-stack look — MovieSheetContext is the one clock both read).
+                A native "modal" cannot do this: its interactive drag never reaches
+                JS, so the background could only react late. The known risk of
+                `animation: "none"` (the OS occasionally animating anyway — see the
+                entity-page note below) is harmless here: the sheet mounts already
+                translated off-screen, so a declined "none" has nothing to flash. */}
             <Stack.Screen
               name="movie/[id]"
               options={{
                 headerShown: false,
-                presentation: "modal",
-                gestureEnabled: true,
-                animation: "slide_from_bottom",
+                presentation: "transparentModal",
+                animation: "none",
+                contentStyle: { backgroundColor: "transparent" },
               }}
             />
             {/* LEGACY ROUTES — search does not push these any more. The entity pages
@@ -149,6 +162,7 @@ export default function RootLayout() {
               }}
             />
           </Stack>
+        </MovieSheetProvider>
         </EntityOverlayProvider>
         </RecentSearchesProvider>
       </FavoritesProvider>
