@@ -51,9 +51,9 @@ const TOP_BAR_TOP = 15;
 // Hero / sheet parallax layout. The backdrop is a FIXED layer; the content is a rounded
 // "sheet" that scrolls up over it while the backdrop drifts slower (parallax) and takes
 // on a progressive blur + dim (the glassy focus shift).
-const HERO_RATIO = 0.70;      // hero height as a fraction of the screen. Lower = shorter hero.
-const LOGO_BOTTOM = 90;      // logo distance from the hero bottom.
-const CONTENT_LIFT = 65;     // px the sheet's rounded top overlaps INTO the backdrop at rest.
+const HERO_RATIO = 0.650;      // hero height as a fraction of the screen. Lower = shorter hero.
+const LOGO_BOTTOM = 60;      // logo distance from the hero bottom.
+const CONTENT_LIFT = 35;     // px the sheet's rounded top overlaps INTO the backdrop at rest.
 // Backdrop blur fade — set to 0 to keep the hero sharp (no progressive glass). Independent
 // of the ticket expand morph below.
 const BLUR_END = 0;
