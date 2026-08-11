@@ -7,6 +7,7 @@ import {
   enrichSubmitted,
   didYouMean,
   isAbort,
+  orderByCatalogue,
   type SearchResult,
 } from "@/services/search";
 
@@ -68,11 +69,25 @@ export interface SearchState {
    *  action, not two, because a dead end that clears but leaves you staring at a
    *  closed keyboard has only done half the job. */
   clear: () => void;
+  /**
+   * True while the kind on screen is having its catalogue counts bought — STUDIOS
+   * and COLLECTIONS only, once per (query, kind). The SUBMITTED list holds
+   * skeletons for that beat rather than painting rows it is about to re-order and
+   * prune: seeing the wrong studio on top and then watching it move is worse than
+   * a short wait, and the app already speaks in skeletons wherever it is waiting.
+   * The TYPING ladder deliberately ignores this flag — its contract is that rows
+   * are held across re-fetches, never blanked under the caret, and mid-typing the
+   * list is churning anyway, so the order correcting in place reads as settling.
+   */
+  pricing: boolean;
 }
 
 export function useSearch(): SearchState {
-  const { query, submitTick, setQuery, focusInput } = useSearchIsland();
+  const { query, submitTick, setQuery, focusInput, resultsFilter } = useSearchIsland();
   const trimmed = query.trim();
+  // The kind row IS the navigation, so it is also what decides where the enrichment
+  // budget goes — see THE BUDGET IS AIMED AT THE KIND ON SCREEN in services/search.
+  const kind = resultsFilter.kind;
 
   const [phase, setPhase] = useState<SearchPhase>("idle");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -97,8 +112,16 @@ export function useSearch(): SearchState {
   const lastIssuedRef = useRef("");
   // Which result set has already been enriched / had suggestions fetched. Reset
   // inside run()'s success handler, because a new result set invalidates both.
-  const enrichedForRef = useRef("");
+  //
+  // ⚠ ENRICHMENT IS NOW KEYED BY (QUERY, KIND), NOT BY QUERY. Pricing is bought per
+  // kind and on demand, so "already paid" is a set of pairs: standing on STUDIOS
+  // pays for studios and leaves COLLECTIONS unbought until you actually go there.
+  const enrichedForRef = useRef(new Set<string>());
   const suggestedForRef = useRef("");
+  // The (query, kind) pair whose counts are in flight, or null. A key rather than a
+  // boolean because the request that loses a race must not switch off the one that
+  // replaced it — it clears only if the key is still its own.
+  const [pricingKey, setPricingKey] = useState<string | null>(null);
 
   /**
    * Present the accordion when the user has stopped typing — by pressing Search, or
@@ -136,7 +159,7 @@ export function useSearch(): SearchState {
         // on the string alone meant backspacing back to an earlier query re-fetched
         // raw rows and then refused to enrich them, so collection and studio counts
         // silently vanished. Tie them to the result set instead.
-        enrichedForRef.current = "";
+        enrichedForRef.current.clear();
         suggestedForRef.current = "";
         setResults(rows);
         setResultsQuery(q);
@@ -228,29 +251,62 @@ export function useSearch(): SearchState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [submitTick]);
 
-  // Collection and studio film counts, bought only once the user has committed.
-  // Runs after the results for the submitted query are in hand — which may be the
-  // same tick as the submit, or later if the submit had to fire its own request.
+  /**
+   * ▸ CATALOGUE COUNTS, BOUGHT ON DEMAND FOR THE KIND YOU ARE READING.
+   *
+   * Runs after the results for the submitted query are in hand — which may be the
+   * same tick as the submit, or later if the submit had to fire its own request —
+   * and now ALSO whenever the kind changes, because the kind decides what is worth
+   * buying. Standing on FILMS, SHOWS or PEOPLE this costs nothing at all: those
+   * rows arrive complete, and `enrichSubmitted` returns immediately.
+   *
+   * Bryan, 2026-08-10, on the old always-on-submit version: "we spend the request
+   * budget on collections, even though we don't go to the tab, which preferably is
+   * not a good idea." So a tab you never open is never priced — and the tab you do
+   * open gets the whole allowance instead of the leftovers.
+   *
+   * The response is re-seated by catalogue size before it lands (see
+   * orderByCatalogue): studios and collections have no ranking signal of their own,
+   * and by this point we have bought the only one that exists.
+   *
+   * ▸ AND THE GATE IS THE KIND, NOT THE SUBMIT (Bryan's PARAM screenshot,
+   * 2026-08-10 20:04). This used to also require `submitted` — a rule inherited
+   * from when enrichment was a submit-time luxury — so he tapped STUDIOS with the
+   * keyboard still up and the list sat in TMDB's coin-toss order until he
+   * dismissed it. Standing on the tab IS the intent; the keyboard's position was
+   * never the signal. The typing-time cost this opens is bounded by construction:
+   * the debounce collapses keystrokes into settled result sets, growing prefixes
+   * overlap almost completely, and the price book turns that overlap into free
+   * receipts — a slow letter-by-letter journey to PARAMOUNT prices roughly what
+   * one submit pass always did, paid in installments. FILMS/SHOWS/PEOPLE typing
+   * still costs zero: those kinds never reach the fetch.
+   */
   useEffect(() => {
-    if (!submitted || phase !== "results") return;
-    if (enrichedForRef.current === resultsQuery) return; // already paid for this query
-    enrichedForRef.current = resultsQuery;
+    if (phase !== "results") return;
+    const key = `${resultsQuery}::${kind}`;
+    if (enrichedForRef.current.has(key)) return; // already paid for this pair
+    enrichedForRef.current.add(key);
 
     const controller = new AbortController();
     const id = reqIdRef.current;
-    enrichSubmitted(results, controller.signal)
+    setPricingKey(key);
+    enrichSubmitted(results, kind, controller.signal)
       .then((rows) => {
         if (id !== reqIdRef.current) return; // a newer search superseded us
-        setResults(rows);
+        setResults(orderByCatalogue(rows));
       })
       .catch((e) => {
         if (!isAbort(e)) console.error("Submit enrichment failed:", e);
+      })
+      .finally(() => {
+        // Only the request that is still the current one may lower the flag.
+        setPricingKey((cur) => (cur === key ? null : cur));
       });
     return () => controller.abort();
-    // `results` is deliberately absent: setResults below would otherwise re-trigger
-    // this effect, and the ref guard already makes it once-per-query.
+    // `results` is deliberately absent: setResults above would otherwise re-trigger
+    // this effect, and the key guard already makes it once-per-(query, kind).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [submitted, phase, resultsQuery]);
+  }, [phase, resultsQuery, kind]);
 
   // (The most-searched ledger used to write here, at the submit moment — recording
   // the ranker's #1 guess. Bryan killed that 2026-08-10 after JURASSIC logged
@@ -302,5 +358,8 @@ export function useSearch(): SearchState {
     suggestions,
     keyboardUp,
     clear,
+    // Only the pair on screen counts as "pricing" — a stale request that lost a
+    // race must never hold the list in skeletons.
+    pricing: pricingKey !== null && pricingKey === `${resultsQuery}::${kind}`,
   };
 }
