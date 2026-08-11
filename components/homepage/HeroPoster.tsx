@@ -14,8 +14,8 @@ interface HeroPosterProps {
 }
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const HERO_HEIGHT = 700;
-const MAX_BOUNCE_DISTANCE = 70;
+const HERO_HEIGHT = 650;
+const MAX_BOUNCE_DISTANCE = 150;
 const PLACEHOLDER_BLURHASH = '|rF?hV%2WCj[ayj[a|j[az_NaeWBj@ayfRayfQfQM{M|azj[azf6fQfQfQIpWXofj[ayj[j[fQayWCoeoeaya}j[ayfQa{oLj?j[WVj[ayayj[fQoff7azayj[ayj[j[ayofayayayj[fQj[ayayj[ayfjj[j[ayjuayj[';
 
 const AnimatedFlatList = Animated.createAnimatedComponent(FlatList);
