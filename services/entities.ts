@@ -47,6 +47,14 @@ export interface EntityFilm {
   voteAverage: number;
   voteCount: number;
   /**
+   * Backdrop path, straight off the credit row — FREE, it was in every response
+   * this mapper reads and was simply being dropped. Null is common (small films
+   * have no backdrop) and means the expanded row renders the no-artwork panel,
+   * exactly the search flow's rule. Added 2026-08-11 for the filmography
+   * accordion: rows unroll into the same marquee card the search results use.
+   */
+  imagePath: string | null;
+  /**
    * TELEVISION, and the only field here an entity credit never sets.
    *
    * Absent on every filmography row — `combined_credits` is not wired, so an
@@ -111,6 +119,7 @@ export const toFilm = (raw: any, opts?: { category?: FilmCategory }): EntityFilm
       genreIds,
       voteAverage,
       voteCount,
+      imagePath: typeof raw.backdrop_path === "string" && raw.backdrop_path ? raw.backdrop_path : null,
     };
   }
 
@@ -136,6 +145,7 @@ export const toFilm = (raw: any, opts?: { category?: FilmCategory }): EntityFilm
     genreIds,
     voteAverage,
     voteCount,
+    imagePath: typeof raw.backdrop_path === "string" && raw.backdrop_path ? raw.backdrop_path : null,
   };
 };
 

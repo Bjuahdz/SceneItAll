@@ -54,6 +54,12 @@ export interface SearchResult {
    *  enrichSubmitted() once the user has actually submitted. Undefined means
    *  "not looked up", which renders as a bare type label rather than a fake zero. */
   filmCount?: number;
+  /** Studio rows only, and ONLY when the film count came back zero — how many TV
+   *  series TMDB attributes to it. A studio that makes television is a real studio
+   *  (Bryan, 2026-08-10: TV "is something we are definitely going to integrate very
+   *  deeply"), so this is what saves it from the shell prune. Undefined means the
+   *  question was never asked, which is the case for every studio that HAS films. */
+  showCount?: number;
   /** Company rows only — every TMDB id sharing this exact name, in the order TMDB
    *  returned them. /search/company hands back decoys, so the real one is resolved
    *  on submit rather than guessed at while typing. */
@@ -686,6 +692,37 @@ export const searchEntities = async (
 // than silently applied.
 const ENRICH_LIMIT = 8;
 
+/**
+ * ▸ THE ON-TAB ALLOWANCE — when the user is STANDING on STUDIOS or COLLECTIONS,
+ * the whole visible list gets priced, and this is only the runaway backstop.
+ *
+ * Round two of the WARNER bug (Bryan's screenshot, 2026-08-10 19:46): round one
+ * aimed the budget at the kind on screen but kept ENRICH_LIMIT — WARNER has ~18
+ * studio rows, the first 8 in TMDB's arbitrary pre-order got priced, and Warner
+ * Bros. Pictures sat at row 9: unpriced, unranked, bare label. The tail contained
+ * the answer, so the tail has to go. A search page yields at most ~20 name-rows,
+ * so this cap exists for pathology, not routine — when it DOES truncate, it logs.
+ */
+const ON_TAB_LIMIT = 24;
+
+/**
+ * ▸ THE PRICE BOOK — a catalogue, once bought, is remembered for the app session.
+ *
+ * Companies keyed by collapsed name + candidate set (the same identity the row
+ * itself has — see collapseSameNamedCompanies); collections by id. His own test
+ * sequence is the proof of value: WARN priced Warner Bros. Pictures at 3,022
+ * films, then WARNER — a different query, same studio — had to buy it again and
+ * could not afford to. With the book, the second query reuses the first query's
+ * receipts and costs only the names it has never seen. Strictly fewer requests,
+ * never more. Session-scoped module state, same practice as quickTrending's cache;
+ * catalogue sizes move on the scale of months, an app session is hours.
+ */
+type EnrichPatch = Partial<SearchResult>;
+const companyPriceBook = new Map<string, EnrichPatch>();
+const collectionPriceBook = new Map<number, EnrichPatch>();
+const companyPriceKey = (r: SearchResult): string =>
+  `${r.title.trim().toLowerCase()}|${(r.candidateIds ?? [r.id]).join(",")}`;
+
 /** Today, as TMDB wants it (YYYY-MM-DD). Sliced off the ISO string rather than
  *  built from local getters — `new Date().getMonth()` is a day out either side of
  *  midnight in a UTC-offset zone, and this bounds a query, not a display. */
@@ -781,14 +818,62 @@ export const studioFacts = (
  */
 export const enrichSubmitted = async (
   results: SearchResult[],
+  kind: KindKey,
   signal?: AbortSignal
 ): Promise<SearchResult[]> => {
-  const targets = results
-    .map((r, i) => ({ r, i }))
-    .filter(({ r }) => r.entityType === "collection" || r.entityType === "company")
-    .slice(0, ENRICH_LIMIT);
+  // ▸ THE BUDGET IS AIMED AT THE KIND ON SCREEN (Bryan, 2026-08-10). It used to
+  // take the first ENRICH_LIMIT collection-and-studio rows in GLOBAL rank order,
+  // which spent requests two ways he objected to: on collections while you were
+  // looking at FILMS and might never open that tab, and — worse — it let one kind
+  // eat the other's budget. Searching WARNER, the collections above them consumed
+  // it before Warner Bros. Pictures at row 5 was reached, so the studio with 3,022
+  // films was the one row that never got a number. Priced per kind, its whole
+  // allowance is available to the list you are actually reading.
+  const want = KIND_OF[kind];
+  const priceable: SearchEntityType[] =
+    want === "collection" || want === "company"
+      ? [want]
+      : // "any" has no kind row to stand on (entity pages only) — price both.
+        kind === "any"
+        ? ["collection", "company"]
+        : [];
+  // FILMS, SHOWS and PEOPLE carry everything they need in the search response.
+  // Standing on one of them costs nothing at all.
+  if (priceable.length === 0) return results;
 
-  if (targets.length === 0) return results;
+  const rows = results
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => priceable.includes(r.entityType));
+  if (rows.length === 0) return results;
+
+  // Receipts first — a name already in the price book costs nothing to know.
+  const fromBook = rows
+    .map(({ r, i }) => {
+      const held =
+        r.entityType === "collection"
+          ? collectionPriceBook.get(r.id)
+          : companyPriceBook.get(companyPriceKey(r));
+      return held ? { i, patch: held } : null;
+    })
+    .filter((x): x is { i: number; patch: EnrichPatch } => x !== null);
+  const bought = new Set(fromBook.map(({ i }) => i));
+
+  // Then the spend, capped by where the user is standing: ON the kind's own tab
+  // the whole list is owed its numbers (ON_TAB_LIMIT is a runaway backstop); the
+  // "any" path keeps the old conservative slice. The cap counts MISSES only —
+  // receipts are free and must never crowd out a fetch.
+  const cap = priceable.length === 1 ? ON_TAB_LIMIT : ENRICH_LIMIT;
+  const misses = rows.filter(({ i }) => !bought.has(i));
+  const targets = misses.slice(0, cap);
+  if (misses.length > targets.length) {
+    // No silent caps: name what was dropped, so a pathological list is a log line
+    // and not a mystery ranking.
+    console.log(
+      `enrichSubmitted: capped at ${cap}, ${misses.length - targets.length} row(s) left unpriced`
+    );
+  }
+
+  if (targets.length === 0 && fromBook.length === 0) return results;
 
   const resolved = await Promise.all(
     targets.map(async ({ r, i }) => {
@@ -796,7 +881,9 @@ export const enrichSubmitted = async (
         if (r.entityType === "collection") {
           const detail = await getJson(`/collection/${r.id}`, signal);
           if (!Array.isArray(detail?.parts)) return { i, patch: null };
-          return { i, patch: collectionFacts(detail.parts) };
+          const patch = collectionFacts(detail.parts);
+          collectionPriceBook.set(r.id, patch);
+          return { i, patch };
         }
         // Company: ask EVERY same-named candidate and keep the one with the MOST
         // films. This used to stop at the first candidate with ANY films — built
@@ -829,20 +916,52 @@ export const enrichSubmitted = async (
           }
         }
         if (best === null) {
-          // Every candidate came back empty: this is a shell with no catalogue.
-          // filmCount 0 marks it for the prune below — a studio with no films is
-          // not an answer to anything (Bryan, 2026-08-08).
-          return { i, patch: { filmCount: 0 } };
+          // ▸ NO FILMS IS NOT YET NO CATALOGUE — ASK TELEVISION BEFORE DELETING.
+          //
+          // The count above comes from /discover/MOVIE, so a studio that makes
+          // only series scores zero and used to be pruned as a shell. Bryan,
+          // 2026-08-10: TV-only studios stay, because the show side of the app is
+          // built and waiting. So a zero-film studio gets one more question.
+          //
+          // ⚠ THE COST IS PAID ONLY WHERE IT DECIDES SOMETHING. This runs for the
+          // rows we were about to DELETE and for no others — a studio with films
+          // never reaches here. Deleting a real studio to save one request is the
+          // wrong trade; spending one to avoid that is the right one.
+          let shows: { id: number; count: number; at: number } | null = null;
+          for (let c = 0; c < ids.length; c++) {
+            const page = await getJson(`/discover/tv?with_companies=${ids[c]}`, signal);
+            const count = page?.total_results ?? 0;
+            if (count > 0 && (shows === null || count > shows.count)) {
+              shows = { id: ids[c], count, at: c };
+            }
+          }
+          // filmCount 0 still marks "no films" for the row's label and the sort;
+          // showCount is what tells the prune this is a television studio, not a
+          // shell. Both zero = nothing to show anyone, and the prune takes it —
+          // and the shell verdict is a receipt too: a name priced at nothing must
+          // not be re-priced every time it turns up in a result set.
+          if (shows === null) {
+            const patch = { filmCount: 0 };
+            companyPriceBook.set(companyPriceKey(r), patch);
+            return { i, patch };
+          }
+          const tvPatch = {
+            id: shows.id,
+            basedIn: r.candidateCountries?.[shows.at] ?? r.basedIn ?? null,
+            filmCount: 0,
+            showCount: shows.count,
+          };
+          companyPriceBook.set(companyPriceKey(r), tvPatch);
+          return { i, patch: tvPatch };
         }
-        return {
-          i,
-          patch: {
-            id: best.id,
-            // The WINNER'S country, not the first candidate's — see candidateCountries.
-            basedIn: r.candidateCountries?.[best.at] ?? r.basedIn ?? null,
-            ...studioFacts(best.films, best.count),
-          },
+        const patch = {
+          id: best.id,
+          // The WINNER'S country, not the first candidate's — see candidateCountries.
+          basedIn: r.candidateCountries?.[best.at] ?? r.basedIn ?? null,
+          ...studioFacts(best.films, best.count),
         };
+        companyPriceBook.set(companyPriceKey(r), patch);
+        return { i, patch };
       } catch (e) {
         if (isAbort(e)) throw e; // a cancellation must propagate, not be swallowed
         return { i, patch: null };
@@ -851,13 +970,74 @@ export const enrichSubmitted = async (
   );
 
   const out = results.slice();
+  // Receipts land first, live fetches second — if a fetch somehow re-priced a name
+  // the book already held, the fresher number wins the row.
+  for (const { i, patch } of fromBook) out[i] = { ...out[i], ...patch };
   for (const { i, patch } of resolved) if (patch) out[i] = { ...out[i], ...patch };
-  // ▸ THE PRUNE. A studio every candidate of which came back empty is a shell, and
-  // shells were crowding real results off the STUDIOS list. Only rows enrichment
-  // POSITIVELY scored 0 are dropped — a row that errored or sat past ENRICH_LIMIT
-  // keeps its undefined count and stays, because "we don't know" must degrade to a
-  // bare label, never to a disappearance.
-  return out.filter((r) => !(r.entityType === "company" && r.filmCount === 0));
+  // ▸ THE PRUNE. A studio with neither films nor series is a shell — a name with no
+  // catalogue behind it (WARNER RECORDS is a record label) — and shells were
+  // crowding real studios off the list. Only rows enrichment POSITIVELY scored
+  // empty are dropped: a row that errored, or sat past ENRICH_LIMIT, keeps its
+  // undefined count and STAYS, because "we did not ask" must degrade to a bare
+  // label and never to a disappearance. That distinction is the whole reason this
+  // cannot simply drop rows with no number on them.
+  return out.filter(
+    (r) => !(r.entityType === "company" && r.filmCount === 0 && !(r.showCount && r.showCount > 0))
+  );
+};
+
+/**
+ * ▸ CATALOGUE DECIDES THE ORDER — for the two kinds that arrive with no ranking
+ * signal at all (Bryan, device, 2026-08-10).
+ *
+ * Films, shows and people all come back carrying TMDB popularity. Companies and
+ * collections come back carrying NOTHING — `fromCompanyRow` and `fromCollectionRow`
+ * both write `popularity: 0` honestly, because there is no such field. So inside the
+ * match tier every studio ties with every other studio, and the tie-break falls
+ * through to TMDB's own arbitrary order. That is why the top "Warner" studio flipped
+ * between two of his searches: `warn` happened to list Warner Bros. Pictures first,
+ * `warner` happened to list Warner Premiere first, and neither ordering consulted
+ * anything real. It was never a ranking — it was a coin toss.
+ *
+ * The size of what a studio or a collection actually holds IS the signal, and by
+ * the time this runs we have bought it. So the rows are re-seated by catalogue.
+ *
+ * ⚠ RE-SEATED IN PLACE, ONE KIND AT A TIME. Each kind's rows are sorted among
+ * THEMSELVES and written back into the same index slots, so films, shows and people
+ * keep the ranking they earned. Rows we never priced sort to that kind's tail in
+ * their original order — an unpriced row must not claim a position it has not
+ * proved, and must not lose one either.
+ *
+ * A TV-only studio ranks on its series count: catalogue is catalogue.
+ */
+const catalogueSize = (r: SearchResult): number | undefined => {
+  if (r.filmCount === undefined && r.showCount === undefined) return undefined;
+  return Math.max(r.filmCount ?? 0, r.showCount ?? 0);
+};
+
+export const orderByCatalogue = (rows: SearchResult[]): SearchResult[] => {
+  const out = rows.slice();
+  for (const type of ["company", "collection"] as const) {
+    const slots: number[] = [];
+    for (let i = 0; i < out.length; i++) if (out[i].entityType === type) slots.push(i);
+    if (slots.length < 2) continue;
+    const seated = slots
+      .map((slot, order) => ({ row: out[slot], order }))
+      .sort((a, b) => {
+        const ca = catalogueSize(a.row);
+        const cb = catalogueSize(b.row);
+        // Unpriced rows hold their relative order at the tail.
+        if (ca === undefined && cb === undefined) return a.order - b.order;
+        if (ca === undefined) return 1;
+        if (cb === undefined) return -1;
+        if (cb !== ca) return cb - ca;
+        return a.order - b.order;
+      });
+    seated.forEach(({ row }, k) => {
+      out[slots[k]] = row;
+    });
+  }
+  return out;
 };
 
 /**
