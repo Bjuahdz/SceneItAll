@@ -31,8 +31,11 @@ import {
 } from "./EntityHero";
 import FilmRow from "./FilmRow";
 import { ChevronLeft } from "../search/glyphs";
+import Marquee, { accordionMotion, ctaFor } from "../search/Marquee";
+import NoArtworkPanel from "../search/NoArtworkPanel";
 import SkeletonRows from "../search/SkeletonRows";
 import SectionHeader from "../search/SectionHeader";
+import { useExpandedFilm } from "@/hooks/useExpandedFilm";
 import { NAV_BAR_H, NAV_BOTTOM } from "@/constants/navMetrics";
 import { FONT, ROW, SEARCH_LAYOUT, SIGNAL, TRACK } from "@/constants/signal";
 import { useBoolPref } from "@/hooks/useBoolPref";
@@ -159,6 +162,7 @@ export default function EntityScreen({
   remeasureOrigin,
   onClose,
   onFoldStart,
+  onGrowStart,
   onReadingChange,
   onFilmsChange,
   filter,
@@ -213,6 +217,19 @@ export default function EntityScreen({
    * flight. Cancelled swipes never reach here — only a committed fold does.
    */
   onFoldStart?: () => void;
+  /**
+   * The GROW'S FIRST MOTION FRAME — after the pre-flight measure beats, the
+   * instant the page visibly starts expanding. No-grow pages fire it at mount.
+   * The search screen collapses the island off this, so the nav's handover
+   * spring and the grow run TOGETHER and end together — the exact mirror of
+   * onFoldStart above, and for the same reason. Bryan tuned this by device
+   * verdicts, both directions, 2026-08-11: at open-commit the pill arrived
+   * "too early, before the transition" (the pre-flight frames put the sweep
+   * ahead of any visible motion); at grow-END it was "too late, as if
+   * delayed"; the ruling is "at the same time, instead of waiting on either
+   * end" — which is motion-start, both ways.
+   */
+  onGrowStart?: () => void;
   /**
    * Announces the full-screen reader opening and closing, so the nav bar can
    * get out from in front of it. Same reason the back chevron hides while
@@ -405,6 +422,13 @@ export default function EntityScreen({
     }
     setSettled(true);
   }, []);
+  // A page with no origin never grows, so its "motion start" is its mount — the
+  // nav's handover must not wait for a motion that will never run. Mount-only:
+  // `origin` cannot change afterwards (the host remounts by token instead).
+  useEffect(() => {
+    if (!origin) onGrowStart?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // THE FLOATING BUILD'S GROW START, restored: the window's onLayout fires, the
   // origin is refreshed (the retries live INSIDE remeasure now — free here, since
@@ -419,9 +443,12 @@ export default function EntityScreen({
     refreshOrigin(() =>
       startAfterCommit(() => {
         startMotion(1, GROW_MS, finishGrow);
+        // First frame of the entrance — the nav's handover rides along from
+        // HERE, so its spring and this grow end together. See onGrowStart.
+        onGrowStart?.();
       })
     );
-  }, [origin, refreshOrigin, startAfterCommit, startMotion, finishGrow]);
+  }, [origin, refreshOrigin, startAfterCommit, startMotion, finishGrow, onGrowStart]);
 
   // As an overlay, leaving means unmounting; as a URL route, it means popping.
   //
@@ -653,6 +680,29 @@ export default function EntityScreen({
     (film: EntityFilm) => router.push(`/movie/${film.id}`),
     [router]
   );
+
+  /**
+   * ▸ THE FILMOGRAPHY IS THE SEARCH ACCORDION (Bryan, 2026-08-11: "these are not
+   * marquee drop lists, it's just a list — make it consistent with the rest of
+   * the search flow"). A released row unrolls into the same Marquee card the
+   * results use; DETAILS pushes the movie sheet; tapping the card folds it back.
+   *
+   * ONE film open across the whole page, keyed by ID rather than index — a
+   * filter or sort re-seating the list must never hand the open card to
+   * whichever film now occupies the old slot. UPCOMING rows stay plain and
+   * navigate: you cannot have a take on an unreleased film, and half of them
+   * have no artwork to unroll (FilmRow's own contract, unchanged).
+   *
+   * The director lane rides the same budget rule as the search flow: fetched
+   * for the OPEN film only, cached per id for the life of the page — see
+   * useExpandedFilm.
+   */
+  const [openFilmId, setOpenFilmId] = useState<number | null>(null);
+  const toggleFilm = useCallback(
+    (id: number) => setOpenFilmId((cur) => (cur === id ? null : id)),
+    []
+  );
+  const director = useExpandedFilm(openFilmId);
 
   // RELEASED / UPCOMING cover FEATURES only. Shorts and documentaries get their own
   // sections rather than being mixed in — they are still the person's work, but a
@@ -971,23 +1021,37 @@ export default function EntityScreen({
               // becomes an ordinary section break, at the same 26 the others use.
               paddingTop={upcoming.length > 0 ? 26 : FIRST_SECTION_TOP(page.kind)}
             />
-            {released.map((f, i) => (
-              <FilmRow
-                key={f.id}
-                film={f}
-                index={i + 1}
-                hasEntry={entryIds.has(f.id)}
-                onPress={openFilm}
-                isLast={i === released.length - 1}
-              />
-            ))}
+            <FilmSlots
+              films={released}
+              entryIds={entryIds}
+              openId={openFilmId}
+              onToggle={toggleFilm}
+              onDetails={openFilm}
+              director={director}
+            />
           </Animated.View>
         )}
 
         {/* Both omitted entirely when empty, which is the common case — most
             people have neither. Design contract 8. */}
-        <MinorSection label="SHORTS" films={shorts} entryIds={entryIds} onPress={openFilm} />
-        <MinorSection label="DOCUMENTARIES" films={docs} entryIds={entryIds} onPress={openFilm} />
+        <MinorSection
+          label="SHORTS"
+          films={shorts}
+          entryIds={entryIds}
+          openId={openFilmId}
+          onToggle={toggleFilm}
+          onDetails={openFilm}
+          director={director}
+        />
+        <MinorSection
+          label="DOCUMENTARIES"
+          films={docs}
+          entryIds={entryIds}
+          openId={openFilmId}
+          onToggle={toggleFilm}
+          onDetails={openFilm}
+          director={director}
+        />
 
         {/* While the seed is holding the page up, the sheet is the skeleton — the real
             rows land in the same geometry, so nothing jumps. "No films on record" is a
@@ -1055,17 +1119,97 @@ export default function EntityScreen({
   );
 }
 
-/** A secondary filmography group — shorts, documentaries. Same rows, own heading. */
+/**
+ * One accordion slot per film — the search results' exact recipe (SubmittedState):
+ * every slot is a persistent, clipped, layout-animated wrapper so a row and the
+ * card it unrolls into trade places inside one animated box, and the rows below
+ * glide rather than jump. The open film's lane reads `1968 · POLANSKI` once the
+ * director lands, the collapsed rows stay bare — the same one-request budget
+ * story as the results list.
+ */
+function FilmSlots({
+  films,
+  entryIds,
+  openId,
+  onToggle,
+  onDetails,
+  director,
+}: {
+  films: EntityFilm[];
+  entryIds: Set<number>;
+  openId: number | null;
+  onToggle: (id: number) => void;
+  onDetails: (f: EntityFilm) => void;
+  director: string | null;
+}) {
+  return (
+    <>
+      {films.map((f, i) => {
+        if (f.id === openId) {
+          const facts = f.year && director ? `${f.year} · ${director}` : f.year ?? "";
+          return (
+            <Animated.View key={f.id} layout={accordionMotion()} style={{ overflow: "hidden" }}>
+              {f.imagePath ? (
+                <Marquee
+                  imageUrl={`https://image.tmdb.org/t/p/w780${f.imagePath}`}
+                  index={i + 1}
+                  typeTag={f.isShow ? "SHOW" : "FILM"}
+                  title={f.title}
+                  facts={facts}
+                  ctaLabel={ctaFor("movie")}
+                  tone="submitted"
+                  onPressCollapse={() => onToggle(f.id)}
+                  onPressCta={() => onDetails(f)}
+                />
+              ) : (
+                // A credit with no backdrop unrolls into the same dark panel the
+                // results use — never a broken image, never a dead tap.
+                <NoArtworkPanel
+                  index={i + 1}
+                  typeTag={f.isShow ? "SHOW" : "FILM"}
+                  title={f.title}
+                  facts={facts}
+                  ctaLabel={ctaFor("movie")}
+                  onPressCollapse={() => onToggle(f.id)}
+                  onPressCta={() => onDetails(f)}
+                />
+              )}
+            </Animated.View>
+          );
+        }
+        return (
+          <Animated.View key={f.id} layout={accordionMotion()} style={{ overflow: "hidden" }}>
+            <FilmRow
+              film={f}
+              index={i + 1}
+              hasEntry={entryIds.has(f.id)}
+              onPress={() => onToggle(f.id)}
+              isLast={i === films.length - 1}
+            />
+          </Animated.View>
+        );
+      })}
+    </>
+  );
+}
+
+/** A secondary filmography group — shorts, documentaries. Same accordion, own heading. */
 function MinorSection({
   label,
   films,
   entryIds,
-  onPress,
+  openId,
+  onToggle,
+  onDetails,
+  director,
 }: {
   label: string;
   films: EntityFilm[];
   entryIds: Set<number>;
-  onPress: (f: EntityFilm) => void;
+  openId: number | null;
+  onToggle: (id: number) => void;
+  onDetails: (f: EntityFilm) => void;
+  director: string | null;
 }) {
   if (films.length === 0) return null;
   return (
@@ -1075,16 +1219,14 @@ function MinorSection({
         right={`${String(films.length).padStart(2, "0")} ${films.length === 1 ? "FILM" : "FILMS"}`}
         paddingTop={0}
       />
-      {films.map((f, i) => (
-        <FilmRow
-          key={f.id}
-          film={f}
-          index={i + 1}
-          hasEntry={entryIds.has(f.id)}
-          onPress={onPress}
-          isLast={i === films.length - 1}
-        />
-      ))}
+      <FilmSlots
+        films={films}
+        entryIds={entryIds}
+        openId={openId}
+        onToggle={onToggle}
+        onDetails={onDetails}
+        director={director}
+      />
     </Animated.View>
   );
 }
