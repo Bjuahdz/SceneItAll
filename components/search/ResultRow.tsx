@@ -150,6 +150,11 @@ const knownForText = (titles: string[], budget: number = KNOWN_FOR_BUDGET): stri
 export const metaDetail = (r: SearchResult, budget?: number): string => {
   if (r.entityType === "person") return knownForText(r.knownFor ?? [], budget);
   if (r.entityType === "collection" || r.entityType === "company") {
+    // A studio with no films but a TV catalogue counts in SERIES — it survives the
+    // shell prune on that number (see showCount), so it must be able to say it.
+    // Only ever set when filmCount came back 0, so the two can never disagree.
+    // "SERIES" is its own plural — no branch, unlike FILM/FILMS below.
+    if (r.showCount !== undefined && r.showCount > 0) return `${r.showCount} SERIES`;
     return r.filmCount === undefined
       ? ""
       : `${r.filmCount} ${r.filmCount === 1 ? "FILM" : "FILMS"}`;

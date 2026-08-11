@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View, type GestureResponderEvent } from "react-native";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import Animated, {
@@ -541,30 +541,55 @@ export default function RecentTile({
   }));
 
   /**
-   * The rect the entity page grows out of, measured fresh.
-   *
-   * `measureInWindow`, not the touch — this tile is not the press target's own box
-   * (the Pressable wraps artwork, a scrim and a plate), and `locationY` is relative
-   * to whichever child was HIT. That mistake put an entity page's fold a card-height
-   * off the marquee once already; see the M6 log.
+   * The RE-measure — the page calls this at every animation start (grow, fold,
+   * back-swipe), never at tap time. Straight copy of the marquee's living
+   * measurement, retries included: Fabric returns 0×0 for several consecutive
+   * frames around scrolls, and the page sits invisible at p = 0 through its
+   * pre-flight, so waiting a few frames is free. Null after the retries keeps
+   * the tap-time rect, which flies anyway — a near-miss beats a page that pops.
    */
   const measure = useCallback(
     (cb: (rect: MarqueeRect | null) => void) => {
-      const node = ref.current;
-      if (!node) return cb(null);
-      node.measureInWindow((mx, my, mw, mh) =>
-        cb(mw > 0 && mh > 0 ? { x: mx, y: my, width: mw, height: mh } : null)
-      );
+      const attempt = (retriesLeft: number) => {
+        const node = ref.current;
+        if (!node) return cb(null);
+        node.measureInWindow((mx, my, mw, mh) => {
+          if (mw > 0 && mh > 0) cb({ x: mx, y: my, width: mw, height: mh });
+          else if (retriesLeft > 0) requestAnimationFrame(() => attempt(retriesLeft - 1));
+          else cb(null);
+        });
+      };
+      attempt(8);
     },
     []
   );
 
-  const handlePress = useCallback(() => {
-    // Artwork is what the page can grow out of; a wordmark has nothing to expand,
-    // so it opens flat rather than folding out of an empty box.
-    if (shape === "wordmark") return onPress(tile);
-    measure((rect) => onPress(tile, rect ?? undefined, measure));
-  }, [tile, shape, onPress, measure]);
+  /**
+   * ▸ THE TAP ANSWERS FROM THE TOUCH, NEVER FROM A MEASUREMENT — the marquee's
+   * verdict, learned here the hard way (2026-08-11: two instrumented rounds of
+   * `rect=NULL` on every board tap, first blamed on the Animated ref, then on the
+   * plain View — the channel itself is what cannot be trusted at tap time). On
+   * Fabric, measureInWindow reads the committed ShadowTree, which lags the glass;
+   * the touch system reports where the pixels actually are. With every child of
+   * the Pressable pointer-transparent, `page − location` IS the tile's on-glass
+   * corner, and the packer already knows the width and height exactly.
+   */
+  const handlePress = useCallback(
+    (e: GestureResponderEvent) => {
+      // Artwork is what the page can grow out of; a wordmark has nothing to expand,
+      // so it opens flat rather than folding out of an empty box.
+      if (shape === "wordmark") return onPress(tile);
+      const { pageX, pageY, locationX, locationY } = e.nativeEvent;
+      const rect: MarqueeRect = {
+        x: pageX - locationX,
+        y: pageY - locationY,
+        width,
+        height,
+      };
+      onPress(tile, rect, measure);
+    },
+    [tile, shape, onPress, measure, width, height]
+  );
 
   const titleSize = span ? TITLE_SIZE.span : shape === "portrait" ? TITLE_SIZE.portrait : TITLE_SIZE.wide;
   // Spans only. See TITLE_SIZE — at one column wide there is no room for a second line.
@@ -575,30 +600,41 @@ export default function RecentTile({
   const scrimHeight = span ? SCRIM_H.span : shape === "portrait" ? SCRIM_H.portrait : SCRIM_H.wide;
 
   return (
-    // The ref sits on the ANIMATED view, not the Pressable, because that is the box
-    // the entity page grows out of — and measureInWindow on it returns the rect as
-    // TRANSFORMED, so a page opened mid-swell grows from the tile you can actually see.
     <Animated.View
-      ref={ref}
       style={[styles.tile, { left: x, top: y, width, height }, isLanding && styles.landingAbove, float]}
     >
     {/* ▸ THE CLIP MOVED IN HERE. The wrapper above is now unclipped so the landing ghost
         can overhang it; this child is what actually holds the corner radius and the
-        surface colour. The wrapper keeps the exact same rect, so `measureInWindow` and
-        the entity page's grow are untouched. */}
-    <View style={styles.clip}>
+        surface colour.
+
+        ▸ AND THE MEASURE REF LIVES HERE, NOT ON THE WRAPPER — the board's grow was
+        dead on device because of exactly that (instrumented 2026-08-11: every tap
+        logged `[tile-grow] rect=NULL`). `measureInWindow` through a REANIMATED
+        component's ref answers with nothing in this Expo Go — same silently-dead
+        native-channel family as scrollTo and useAnimatedScrollHandler, already
+        documented in this repo. This plain View is the same rectangle in flow
+        (absoluteFill inside the wrapper), it measures reliably, and native window
+        measurement walks the real view hierarchy, so the wrapper's float/landing
+        transforms are still included: a page opened mid-swell still grows from the
+        tile you can actually see. */}
+    <View ref={ref} style={styles.clip}>
     <Pressable
       onPress={handlePress}
       style={StyleSheet.absoluteFill}
       accessibilityRole="button"
       accessibilityLabel={search.title}
     >
+      {/* ⚠ EVERY CHILD BELOW IS POINTER-TRANSPARENT. The tap-time rect is derived
+          from the touch (see handlePress), and `locationX/Y` are relative to
+          whichever view the finger actually HIT — a child that takes the touch
+          poisons the rect by its own offset (the marquee's M6 scar). The Pressable
+          must be the only thing a finger can land on. */}
       {shape === "wordmark" ? (
         // A wordmark has no photograph to defocus, so its whole content IS text — and
         // the reveal is the only thing standing between "it resolved" and "it faded
         // in". Without it a studio tile would land already legible next to a film
         // still coming into focus.
-        <Animated.View style={[styles.wordmark, { padding: inset }, textStyle]}>
+        <Animated.View pointerEvents="none" style={[styles.wordmark, { padding: inset }, textStyle]}>
           <Text style={styles.tag}>{TYPE_TAG[search.entity_type]}</Text>
           <Text style={[styles.wordmarkName, { fontSize: span ? 34 : 14 }]} numberOfLines={2}>
             {search.title.toUpperCase()}
@@ -633,6 +669,7 @@ export default function RecentTile({
             // needed a dissolve — the blur ghost and the landing spring are their
             // entrance.
             transition={0}
+            pointerEvents="none"
           />
           {/* Same ground colour at every stop — only the alphas differ. See SCRIM_H:
               eased onset so the ramp has no traceable top edge, the flood kept at
@@ -644,6 +681,7 @@ export default function RecentTile({
             pointerEvents="none"
           />
           <Animated.View
+            pointerEvents="none"
             style={[styles.plate, { left: inset, right: inset, bottom: inset - 1 }, textStyle]}
           >
             <Text style={[styles.title, { fontSize: titleSize, lineHeight: titleSize + 2 }]} numberOfLines={2}>
