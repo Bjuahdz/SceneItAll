@@ -52,7 +52,7 @@ import {
   type TabName,
 } from "@/contexts/SearchIslandContext";
 import { useEntityOverlay } from "@/contexts/EntityOverlayContext";
-import { SIGNAL, accentAlpha } from "@/constants/signal";
+import { SIGNAL, accentAlpha, inkAlpha } from "@/constants/signal";
 import {
   FILTER_DEFAULTS,
   SEARCH_FILTER_DEFAULTS,
@@ -1519,7 +1519,17 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="Clear search"
-                    hitSlop={8}
+                    // ▸ THE TARGET IS TWICE THE MARK (Bryan, device, 2026-08-10:
+                    // "somewhat hard to click"). The visible × stays small — it is a
+                    // secondary control inside a field — but the box you may hit is
+                    // 22 + 2×14 = 50pt, past Apple's 44pt floor. Slop rather than a
+                    // bigger box ON PURPOSE: `fieldWithClear` reserves the text's
+                    // right padding from CLEAR_BOX, so growing the box would push the
+                    // query text sideways and move the mark off its board position.
+                    // Slop costs no geometry. It can only grow LEFT into the field's
+                    // own empty right end (the text is left-aligned) and stops well
+                    // short of the dismiss disc outside the field.
+                    hitSlop={14}
                     style={styles.clearHit}
                     onPress={() => {
                       setQuery("");
@@ -1529,11 +1539,18 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
                       raiseKeyboard();
                     }}
                   >
-                    <Svg width={15} height={15} viewBox="0 0 15 15">
+                    {/* ⚠ STILL NO RING AND NO FILL — the law above stands; a filled
+                        circle here would read as a second dismiss disc. Presence is
+                        bought from the MARK instead: 15 → 17 with the viewBox held at
+                        15 (so the stroke scales with it, 1.7 → ~1.93 effective), and
+                        the colour lifted off MUTED, which at this size read as a
+                        smudge. Ink at 0.7 is legibly brighter than the placeholder
+                        grey while staying under the query text it sits beside. */}
+                    <Svg width={17} height={17} viewBox="0 0 15 15">
                       <Path
                         d="M3.6 3.6L11.4 11.4M11.4 3.6L3.6 11.4"
-                        stroke="#8A8279"
-                        strokeWidth={1.6}
+                        stroke={inkAlpha(0.7)}
+                        strokeWidth={1.7}
                         strokeLinecap="round"
                         fill="none"
                       />
