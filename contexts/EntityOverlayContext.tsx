@@ -270,9 +270,15 @@ export function EntityOverlayProvider({ children }: { children: React.ReactNode 
 export function EntityOverlayHost({
   onClose,
   onFoldStart,
+  onGrowStart,
 }: {
   onClose?: () => void;
   onFoldStart?: () => void;
+  /** The grow's first motion frame (mount, for pages with no grow). Fires once
+   *  per page. The search screen collapses the island off this so the nav's
+   *  handover runs WITH the page's entrance and lands with it — the mirror of
+   *  onFoldStart. */
+  onGrowStart?: () => void;
 }) {
   const { req, close, registerFold, setReading, setFilms, appliedFilter } = useEntityOverlay();
   if (!req) return null;
@@ -283,6 +289,7 @@ export function EntityOverlayHost({
         req={req}
         onClose={onClose ?? close}
         onFoldStart={onFoldStart}
+        onGrowStart={onGrowStart}
         onReadingChange={setReading}
         onFilmsChange={setFilms}
         // A PROP, not a context read inside the page. EntityScreen is also the
@@ -300,6 +307,7 @@ function OverlayPage({
   req,
   onClose,
   onFoldStart,
+  onGrowStart,
   onReadingChange,
   onFilmsChange,
   filter,
@@ -308,6 +316,7 @@ function OverlayPage({
   req: EntityOverlayRequest;
   onClose: () => void;
   onFoldStart?: () => void;
+  onGrowStart?: () => void;
   onReadingChange?: (reading: boolean) => void;
   onFilmsChange?: (films: EntityFilm[]) => void;
   filter?: FilterState;
@@ -330,6 +339,7 @@ function OverlayPage({
       remeasureOrigin={req.remeasureOrigin}
       onClose={onClose}
       onFoldStart={onFoldStart}
+      onGrowStart={onGrowStart}
       onReadingChange={onReadingChange}
       onFilmsChange={onFilmsChange}
       filter={filter}
