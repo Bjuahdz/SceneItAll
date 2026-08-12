@@ -27,6 +27,13 @@ keystore.properties
 #LOCAL LOGS
 REVIVAL_LOG.md
 PROJECT-PLAN.md
+SEARCH-IMPLEMENTATION-PLAN.md
+SEARCH-BOARD-SPECS.md
+
+# Local test benches — dev-only, stay private (Bryan, 2026-08-10). The verify
+# gates in scripts/ (check-worklets, check-recents-pack) are NOT tests and ARE
+# committed: package.json's `verify` calls them, so a clone breaks without them.
+__tests__/
 
 # Frozen copies of rejected designs, kept for reference while a surface is still in
 # flux. Local only — .txt so Metro and tsc ignore them, and out of the repo because a

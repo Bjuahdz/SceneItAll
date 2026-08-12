@@ -14,6 +14,8 @@
  *   pill drifted 28pt high and 4pt tall while these lived in two files.
  */
 
+import { Dimensions } from "react-native";
+
 /** Overall size of the bottom furniture. 1 = the original pill, 1.15 = shipped. */
 export const NAV_SCALE = 1.15;
 
@@ -37,6 +39,15 @@ export const NAV_BOTTOM = 25;
 /** Left/right margin of the floating run. */
 export const NAV_SIDE_INSET = 16;
 
+/**
+ * Air between the island and the KEYBOARD's top edge while composing. Lives here
+ * (not in the nav's file) because two things must agree on it: the nav, whose lift
+ * pins the island `kbH + KB_GAP` above the screen bottom, and the compose screen's
+ * QUICK SEARCHES stack, which anchors itself above that same island. Two copies of
+ * this number is a stack that drifts off the island the day one of them is tuned.
+ */
+export const KB_GAP = 10;
+
 /** Air between two islands at rest. The gap is the point — they never merge. */
 export const NAV_ISLAND_GAP = 14;
 
@@ -52,6 +63,23 @@ export const NAV_LABEL_GAP = px(8);
 export const NAV_BUBBLE_H = px(40);
 /** Every glyph in the bar. 22-ish: below this most shapes stop reading. */
 export const NAV_ICON = px(21);
+
+// ── The FILTER pill's rect, in window coordinates.
+//
+// DERIVED, NOT MEASURED. The run is centred and spans exactly the side insets in
+// the FILTER pose, so the pill's rect is a pure function of the numbers above —
+// no measureInWindow, and therefore none of the 0×0 / stale-rect failure modes
+// that the entity grow needed a whole retry chain to survive. The filter sheet
+// grows out of this; `_layout.tsx` lays the pill out from the same width, so the
+// two cannot drift.
+const TOTAL_W = Dimensions.get("window").width - NAV_SIDE_INSET * 2;
+export const NAV_FILTER_W = TOTAL_W - NAV_BAR_H * 2 - NAV_ISLAND_GAP * 2;
+export const NAV_FILTER_RECT = {
+  x: NAV_SIDE_INSET + NAV_BAR_H + NAV_ISLAND_GAP,
+  y: Dimensions.get("window").height - NAV_BOTTOM - NAV_BAR_H,
+  width: NAV_FILTER_W,
+  height: NAV_BAR_H,
+};
 
 // ── Material. The glass is one recipe: a tint over a blur, and a single hairline rim.
 export const NAV_GLASS_TINT = "rgba(15, 15, 20, 0.45)";

@@ -1,7 +1,8 @@
 import { View, Dimensions, ActivityIndicator, Text, ScrollView, Pressable, StyleSheet, StatusBar, NativeSyntheticEvent, NativeScrollEvent } from 'react-native'
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import ReAnimated, { useSharedValue, useDerivedValue, useAnimatedStyle, interpolate, Extrapolation, withSpring, withTiming, withSequence, Easing, FadeInDown, FadeOut, type EntryAnimationsValues, type ExitAnimationsValues } from 'react-native-reanimated';
+import ReAnimated, { useSharedValue, useDerivedValue, useAnimatedStyle, interpolate, Extrapolation, withSpring, withTiming, withSequence, Easing, FadeInDown, FadeOut, runOnJS, type EntryAnimationsValues, type ExitAnimationsValues, type SharedValue } from 'react-native-reanimated';
+import { Gesture, GestureDetector, type PanGesture } from 'react-native-gesture-handler';
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import useFetch from '@/services/useFetch';
@@ -30,6 +31,8 @@ import Svg, { Path, Line } from 'react-native-svg';
 
 import { TICKET_GLASS_TINT, TICKET_ACCENT, ink, accent } from '@/components/moviedetails/ticketTheme';
 import { NAV_BOTTOM, NAV_SIDE_INSET } from '@/constants/navMetrics';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useMovieSheet, SHEET_TOP_GAP, SHEET_RADIUS } from '@/contexts/MovieSheetContext';
 
 // Add new memoized components to prevent unnecessary re-renders
 const MemoizedMovieTabBar = React.memo(MovieTabBar);
@@ -48,9 +51,9 @@ const TOP_BAR_TOP = 15;
 // Hero / sheet parallax layout. The backdrop is a FIXED layer; the content is a rounded
 // "sheet" that scrolls up over it while the backdrop drifts slower (parallax) and takes
 // on a progressive blur + dim (the glassy focus shift).
-const HERO_RATIO = 0.70;      // hero height as a fraction of the screen. Lower = shorter hero.
-const LOGO_BOTTOM = 90;      // logo distance from the hero bottom.
-const CONTENT_LIFT = 65;     // px the sheet's rounded top overlaps INTO the backdrop at rest.
+const HERO_RATIO = 0.650;      // hero height as a fraction of the screen. Lower = shorter hero.
+const LOGO_BOTTOM = 60;      // logo distance from the hero bottom.
+const CONTENT_LIFT = 35;     // px the sheet's rounded top overlaps INTO the backdrop at rest.
 // Backdrop blur fade — set to 0 to keep the hero sharp (no progressive glass). Independent
 // of the ticket expand morph below.
 const BLUR_END = 0;
@@ -163,6 +166,22 @@ interface MovieDetailsViewProps {
   // stack owner at the foot of this file for why the memory cannot live in here.
   initialTab?: TabType;
   onTabChange?: (tab: TabType) => void;
+  // ── Drag-to-dismiss plumbing (the pan itself lives in the stack owner) ──
+  // The card's pan. Each level declares ITS OWN Native gesture simultaneous with
+  // it — declared from this side because two levels coexist for the 280ms of a
+  // push/pop slide, and one shared Native gesture object cannot be attached to
+  // two ScrollViews at once.
+  sheetPan: PanGesture;
+  // Live scroll offset of THIS level's ScrollView — the pan engages only at ≤ top.
+  sheetScrollY: SharedValue<number>;
+  // 1 while cinema mode or the artwork viewer owns the screen: the sheet must not
+  // be draggable out from under a playing trailer or an expanded artwork.
+  dragLockSV: SharedValue<number>;
+  // True while a drag is displacing the sheet: the inner scroll is disabled so a
+  // reversing finger moves the SHEET back up rather than scrolling the content
+  // under it. Re-enabled on release (mid-gesture re-enable needs scrollTo, which
+  // is dead in Expo Go — lifting the finger is the reset).
+  scrollLocked: boolean;
 }
 
 /**
@@ -192,6 +211,10 @@ const MovieDetailsView = ({
   autoTrailer,
   initialTab,
   onTabChange,
+  sheetPan,
+  sheetScrollY,
+  dragLockSV,
+  scrollLocked,
 }: MovieDetailsViewProps) => {
   const [artwork, setArtwork] = useState<HeroArtwork | null>(null);
   // /images has answered for THIS movie — successfully or not. Nothing paints before it.
@@ -260,6 +283,30 @@ const MovieDetailsView = ({
     });
   }, [expandedArtwork, artworkSV]);
 
+  // A fresh level starts at its own top — the drag gate must not inherit the
+  // previous level's scroll depth for the frames before this view's first scroll.
+  useEffect(() => {
+    sheetScrollY.value = 0;
+    // One-shot on mount by design.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cinema and the artwork viewer own the screen — the sheet must not be
+  // draggable out from underneath either. A flag, not an animation.
+  useEffect(() => {
+    dragLockSV.value = cinema || expandedArtwork !== null ? 1 : 0;
+  }, [cinema, expandedArtwork, dragLockSV]);
+
+  // THIS level's half of the drag handshake: its ScrollView's native gesture is
+  // declared simultaneous with the card's pan, so at the top of the content a
+  // downward pull can feed the pan (which drives the sheet) while the scroll —
+  // bounces off, offset clamped at 0 — has nothing to do. Declared per level,
+  // from this side; see the sheetPan prop note.
+  const scrollNative = React.useMemo(
+    () => Gesture.Native().simultaneousWithExternalGesture(sheetPan),
+    [sheetPan]
+  );
+
   // The scroll stage sinks one full screen-height — off-stage from ANY scroll position.
   const stageStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: cinemaSV.value * height }],
@@ -288,10 +335,12 @@ const MovieDetailsView = ({
   const scrollFold = useSharedValue(0); // 0 = at rest / scrolling up · 1 = scrolling down
   const lastYRef = useRef(0);
   const foldedRef = useRef(false);
-  // Bounce only at the top (pull-to-zoom). Once the user has scrolled down, lock the
-  // bottom — no rubber-band overscroll when they hit the end of the ticket.
-  const [bounces, setBounces] = useState(true);
-  const bouncesRef = useRef(true);
+  // The scroll no longer bounces AT ALL. The top bounce existed for the hero
+  // pull-to-zoom, and that gesture slot now belongs to drag-to-dismiss: with
+  // bounces off, a downward pull at offset 0 moves NOTHING inside the sheet, so
+  // the card's pan can take the very same finger travel and move the sheet
+  // itself — no rubber-banded content fighting the sheet's slide. The zoom (and
+  // the bounces state machinery that gated it) retired with the trade.
   // The capture module used to be SEATED in the ticket and hand its verb row off to a
   // bottom dock as it scrolled away — a scroll-driven parallax between two copies of the
   // same row, with a flag deciding which copy was touchable (Paper 04–05). That whole
@@ -301,6 +350,7 @@ const MovieDetailsView = ({
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = e.nativeEvent.contentOffset.y;
     scrollY.value = y;
+    sheetScrollY.value = y; // the drag gate: the card's pan engages only at ≤ top
     const dy = y - lastYRef.current;
     lastYRef.current = y;
     let folded = foldedRef.current;
@@ -310,24 +360,14 @@ const MovieDetailsView = ({
       foldedRef.current = folded;
       scrollFold.value = folded ? 1 : 0; // a flag, not an animation — nothing renders off it
     }
-    const allowBounce = y <= 1;
-    if (allowBounce !== bouncesRef.current) {
-      bouncesRef.current = allowBounce;
-      setBounces(allowBounce);
-    }
   };
 
   const heroH = height * HERO_RATIO;
 
   // FIXED backdrop: STATIC by design — no scroll drift. Moving it exposed the layer
   // beneath as a gray band, and the sheet's expand morph is the one parallax gesture
-  // this screen needs. The image only zooms on pull-down (overscroll), which can never
-  // reveal an edge because it grows, not slides.
-  const heroImageAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { scale: interpolate(scrollY.value, [-400, -0.1, 0], [1.8, 1, 1], Extrapolation.CLAMP) },
-    ],
-  }));
+  // this screen needs. (The pull-down hero ZOOM that used to live here rode the top
+  // bounce, and retired with it — pull-down at the top is drag-to-dismiss now.)
 
   // Backdrop blur fade — disabled when BLUR_END is 0 (hero stays sharp). Cinema mode
   // lifts it entirely (× (1 − cinema)) so the backdrop shows raw behind the trailer.
@@ -724,7 +764,7 @@ const MovieDetailsView = ({
           full-strength blur + dim fades in with scroll (the glassy focus shift). */}
       <View style={[styles.backdropLayer, { height: heroH }]} pointerEvents="none">
         {imageUri ? (
-          <ReAnimated.View style={[StyleSheet.absoluteFill, heroImageAnimatedStyle]}>
+          <View style={StyleSheet.absoluteFill}>
             <Image
               source={{ uri: imageUri }}
               style={{ width: '100%', height: '100%' }}
@@ -744,7 +784,7 @@ const MovieDetailsView = ({
               locations={[0, 0.9, 1]}
               style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '35%' }}
             />
-          </ReAnimated.View>
+          </View>
         ) : (
           <View style={{ flex: 1, backgroundColor: PLACEHOLDER_COLOR }} />
         )}
@@ -827,14 +867,15 @@ const MovieDetailsView = ({
           screen-height down (transform-only) so the ticket exits without touching
           scroll position, then brings it back exactly where it was. */}
       <ReAnimated.View style={[styles.stage, stageStyle]}>
+      <GestureDetector gesture={scrollNative}>
       <ScrollView
         onScroll={handleScroll}
         scrollEventThrottle={16}
-        bounces={bounces}
+        bounces={false}
         alwaysBounceVertical={false}
         showsVerticalScrollIndicator={false}
         overScrollMode="never"
-        scrollEnabled={!cinema}
+        scrollEnabled={!cinema && !scrollLocked}
       >
         {/* Transparent spacer — reveals the fixed backdrop above the sheet. */}
         <View style={{ height: heroH - CONTENT_LIFT }} />
@@ -1002,6 +1043,7 @@ const MovieDetailsView = ({
         {/* Clearance below the ticket so its bottom edge rises above the capture pill. */}
         <View style={{ height: 110 }} />
       </ScrollView>
+      </GestureDetector>
       </ReAnimated.View>
 
 
@@ -1542,6 +1584,24 @@ const MemoizedMovieDetailsView = React.memo(MovieDetailsView);
 
 const NAV_SLIDE_MS = 280;
 
+// ── The sheet's own travel (MovieSheetContext is the clock, these are its ──
+//    curves). In: a non-bouncy spring — decisive arrival, no visible wobble,
+//    the same family as NAV_SPRING. Out: eased-in timing, so the card
+//    accelerates away like a thing released rather than a thing pushed.
+const SHEET_IN_SPRING = { damping: 30, stiffness: 280, mass: 1 };
+const SHEET_OUT_TIMING = { duration: 300, easing: Easing.in(Easing.cubic) };
+
+// ── The drag grammar (increment 2) ──────────────────────────────────────────
+// Pull down at the TOP of the sheet's content and the sheet follows the finger
+// — progress becomes a pure function of finger travel, so the background's
+// recede, corners and dim reverse in step by construction. Release decides.
+const DRAG_ACTIVATE_Y = 10; //  downward travel before the pan claims the touch
+const DRAG_FAIL_X = 16; //      sideways travel that hands the touch to a rail
+const FLICK_DISMISS_V = 700; // px/s down — a flick dismisses from any depth
+const DISMISS_BELOW_P = 0.6; // released beyond 40% of the travel → it leaves…
+const REVERSE_RESCUE_V = 60; // …unless the finger was moving back UP this fast
+const RELEASE_MIN_V = 900; //   px/s floor when turning release speed into time
+
 /**
  * The route component — a self-contained navigation stack INSIDE the one modal sheet.
  *
@@ -1560,6 +1620,48 @@ const MovieDetailsScreen = () => {
   const { id, trailer } = useLocalSearchParams();
   const router = useRouter();
   const [movieStack, setMovieStack] = useState<string[]>([String(id)]);
+
+  // ── THE SHEET PRESENTATION (increment 1 of the card-stack look) ─────────────
+  // The route is a TRANSPARENT modal now — the OS mounts it with no animation and
+  // this component draws the whole presentation: a rounded card that slides up
+  // from below while the screen underneath (still live behind us) recedes. Both
+  // movements are pure functions of ONE shared value, `progress`, owned by
+  // MovieSheetContext — the recede stage in (tabs) reads the same value, so the
+  // sheet and the background cannot disagree on any frame.
+  const insets = useSafeAreaInsets();
+  const { progress } = useMovieSheet();
+  const screenH = Dimensions.get('window').height;
+  // The card's top edge: below the status bar, leaving SHEET_TOP_GAP of the
+  // receded screen in view — the sliver that says "your place is kept".
+  const sheetTop = insets.top + SHEET_TOP_GAP;
+  const travel = screenH - sheetTop;
+
+  useEffect(() => {
+    progress.value = withSpring(1, SHEET_IN_SPRING);
+    return () => {
+      // Safety net for any unmount that skipped the animated dismissal (a
+      // deep-link replace, a dev reload): never leave the card behind receded.
+      progress.value = 0;
+    };
+    // One-shot on mount by design.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const sheetSlideStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: (1 - progress.value) * travel }],
+  }));
+
+  // ── Drag-to-dismiss state (all UI-thread; the pan reads/writes these) ──────
+  const sheetScrollY = useSharedValue(0); // current level's scroll offset (the gate)
+  const dragLockSV = useSharedValue(0); //   1 while cinema / artwork own the screen
+  const dismissingSV = useSharedValue(0); // 1 once an exit is committed — pan goes inert
+  const engaged = useSharedValue(0); //      1 while a finger is driving the sheet
+  const engageTy = useSharedValue(0); //     pan translationY at the engage frame
+  const engageP = useSharedValue(1); //      progress at the engage frame
+  // While engaged, the inner scroll is disabled so a reversing finger moves the
+  // SHEET back up instead of scrolling content under a displaced card. One
+  // render at engage and one at release — the drag itself never touches React.
+  const [scrollLocked, setScrollLocked] = useState(false);
 
   // +1 = push (new view from the right) · -1 = pop (previous view from the left).
   // A SharedValue so the enter/exit worklets read the CURRENT direction when they
@@ -1630,38 +1732,188 @@ const MovieDetailsScreen = () => {
     if (depthRef.current > 1) tabStack.current.length = depthRef.current - 1;
   }, [navDir]);
 
-  const dismissSheet = React.useCallback(() => {
+  // Dismissal animates the sheet home FIRST, then pops the route — the route
+  // itself unmounts with no OS animation, so by the time it goes there must be
+  // nothing left on screen to vanish. Guarded against a double chevron tap:
+  // two `router.back()`s would pop the screen under this one too.
+  const dismissing = useRef(false);
+  const finishDismiss = React.useCallback(() => {
     router.back();
   }, [router]);
+  const markDismissing = React.useCallback(() => {
+    dismissing.current = true;
+  }, []);
+  const resetDismissing = React.useCallback(() => {
+    dismissing.current = false;
+    dismissingSV.value = 0;
+  }, [dismissingSV]);
+  const dismissSheet = React.useCallback(() => {
+    if (dismissing.current) return;
+    dismissing.current = true;
+    dismissingSV.value = 1; // the pan must not catch a sheet the chevron sent home
+    progress.value = withTiming(0, SHEET_OUT_TIMING, (finished) => {
+      if (finished) {
+        runOnJS(finishDismiss)();
+      } else {
+        // Interrupted (nothing else writes this value today, but a stuck guard
+        // would make the sheet undismissable — cheap insurance).
+        runOnJS(resetDismissing)();
+      }
+    });
+  }, [progress, dismissingSV, finishDismiss, resetDismissing]);
+
+  // ── THE PAN — the sheet's drag grammar, one gesture on the whole card. ─────
+  //
+  // It activates on DRAG_ACTIVATE_Y of downward travel (upward drags never wake
+  // it; DRAG_FAIL_X of sideways travel hands the touch to the Similar rail /
+  // extras / swipeable take cards) and runs SIMULTANEOUS with each level's
+  // ScrollView. Activation is not engagement: the pan drives nothing until the
+  // frame where the content sits at its top AND the finger is moving down — so
+  // a long upward-scroll that reaches the top mid-stroke hands its remaining
+  // travel straight to the sheet, with the translation at that frame as the
+  // baseline. From engagement on, progress = engageP − drag/travel: the sheet,
+  // the recede, the corners and the dim all track the finger because they are
+  // all already functions of progress.
+  //
+  // Release: a downward flick (FLICK_DISMISS_V) or resting past DISMISS_BELOW_P
+  // commits the exit at the finger's own speed (never slower than RELEASE_MIN_V,
+  // clamped 140–300ms); anything else — including a deep drag flicked back UP —
+  // snaps home on the seating spring, inheriting the release velocity.
+  //
+  // Built once (useMemo, all deps stable): the scrollLocked render at engage
+  // must not rebuild a gesture that is mid-touch.
+  const pan = React.useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetY(DRAG_ACTIVATE_Y)
+        .failOffsetX([-DRAG_FAIL_X, DRAG_FAIL_X])
+        .onUpdate((e) => {
+          if (dismissingSV.value === 1 || dragLockSV.value === 1) return;
+          if (engaged.value === 0) {
+            if (sheetScrollY.value <= 1 && e.velocityY > 0) {
+              engaged.value = 1;
+              engageTy.value = e.translationY;
+              engageP.value = progress.value;
+              runOnJS(setScrollLocked)(true);
+            }
+            return;
+          }
+          const drag = e.translationY - engageTy.value;
+          const next = engageP.value - drag / travel;
+          progress.value = Math.min(1, Math.max(0, next));
+        })
+        .onEnd((e) => {
+          if (engaged.value === 0) return;
+          engaged.value = 0;
+          runOnJS(setScrollLocked)(false);
+          if (dismissingSV.value === 1 || dragLockSV.value === 1) return;
+          const p = progress.value;
+          const flung = e.velocityY > FLICK_DISMISS_V;
+          const past = p < DISMISS_BELOW_P && e.velocityY > -REVERSE_RESCUE_V;
+          if (flung || past) {
+            dismissingSV.value = 1;
+            runOnJS(markDismissing)();
+            // Finish at the finger's speed: remaining distance over release
+            // velocity, floored so a rest-release still leaves decisively.
+            const vEff = Math.max(e.velocityY, RELEASE_MIN_V);
+            const ms = Math.min(300, Math.max(140, ((p * travel) / vEff) * 1000));
+            progress.value = withTiming(
+              0,
+              { duration: ms, easing: Easing.out(Easing.quad) },
+              (finished) => {
+                if (finished) runOnJS(finishDismiss)();
+              }
+            );
+          } else {
+            // Home, inheriting the finger's velocity (px/s → progress/s, sign
+            // flipped because up-finger = rising progress).
+            progress.value = withSpring(1, { ...SHEET_IN_SPRING, velocity: -e.velocityY / travel });
+          }
+        })
+        .onFinalize(() => {
+          // Touch cancelled without onEnd (a system gesture stole it): release
+          // the lock and re-seat — never leave the sheet parked mid-air.
+          if (engaged.value === 1) {
+            engaged.value = 0;
+            runOnJS(setScrollLocked)(false);
+            if (dismissingSV.value === 0) progress.value = withSpring(1, SHEET_IN_SPRING);
+          }
+        }),
+    [
+      travel,
+      progress,
+      sheetScrollY,
+      dragLockSV,
+      dismissingSV,
+      engaged,
+      engageTy,
+      engageP,
+      finishDismiss,
+      markDismissing,
+    ]
+  );
 
   const depth = movieStack.length;
   const current = movieStack[depth - 1];
   depthRef.current = depth;
 
   return (
-    <View style={{ flex: 1, backgroundColor: 'black', overflow: 'hidden' }}>
+    // The stage is TRANSPARENT — the receded card (the screen we came from) shows
+    // through everywhere the sheet isn't.
+    <View style={{ flex: 1 }}>
+      {/* The sliver of the old screen above the sheet is DEAD ground, like the
+          native card stack's: this swallows those taps so nothing on the receded
+          card can be pressed through the gap. */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={() => {}} accessible={false} />
+
+      {/* THE SHEET CARD — rounded top corners, clipped, parked below the status
+          bar. Its slide and the background's recede read the same shared value;
+          the pan on this card is what lets a finger drive that value directly. */}
+      <GestureDetector gesture={pan}>
       <ReAnimated.View
-        // Depth in the key so the same movie can appear twice in one chain; a key
-        // change swaps the single mounted view with the directional slide pair.
-        key={`level-${depth}-${current}`}
-        entering={hasNavigated.current ? slideEnter : undefined}
-        exiting={slideExit}
-        style={{ flex: 1, backgroundColor: 'black' }}
+        style={[
+          {
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: sheetTop,
+            height: travel,
+            borderTopLeftRadius: SHEET_RADIUS,
+            borderTopRightRadius: SHEET_RADIUS,
+            overflow: 'hidden',
+            backgroundColor: 'black',
+          },
+          sheetSlideStyle,
+        ]}
       >
-        <MemoizedMovieDetailsView
-          movieId={current}
-          nested={depth > 1}
-          // Dispense only on the sheet's FIRST open; in-sheet pushes/pops slide instead.
-          dispense={depth === 1 && !hasNavigated.current}
-          onOpenMovie={pushMovie}
-          onBack={depth > 1 ? popMovie : dismissSheet}
-          autoTrailer={depth === 1 && !hasNavigated.current && trailer === '1'}
-          // Read at mount, and the view is remounted on every level change — which is
-          // exactly what makes coming back land on the tab that was left.
-          initialTab={tabStack.current[depth - 1] ?? 'details'}
-          onTabChange={rememberTab}
-        />
+        <ReAnimated.View
+          // Depth in the key so the same movie can appear twice in one chain; a key
+          // change swaps the single mounted view with the directional slide pair.
+          key={`level-${depth}-${current}`}
+          entering={hasNavigated.current ? slideEnter : undefined}
+          exiting={slideExit}
+          style={{ flex: 1, backgroundColor: 'black' }}
+        >
+          <MemoizedMovieDetailsView
+            movieId={current}
+            nested={depth > 1}
+            // Dispense only on the sheet's FIRST open; in-sheet pushes/pops slide instead.
+            dispense={depth === 1 && !hasNavigated.current}
+            onOpenMovie={pushMovie}
+            onBack={depth > 1 ? popMovie : dismissSheet}
+            autoTrailer={depth === 1 && !hasNavigated.current && trailer === '1'}
+            // Read at mount, and the view is remounted on every level change — which is
+            // exactly what makes coming back land on the tab that was left.
+            initialTab={tabStack.current[depth - 1] ?? 'details'}
+            onTabChange={rememberTab}
+            sheetPan={pan}
+            sheetScrollY={sheetScrollY}
+            dragLockSV={dragLockSV}
+            scrollLocked={scrollLocked}
+          />
+        </ReAnimated.View>
       </ReAnimated.View>
+      </GestureDetector>
     </View>
   );
 };

@@ -11,7 +11,8 @@
     "test": "jest --watchAll",
     "lint": "expo lint",
     "check:worklets": "node scripts/check-worklets.mjs",
-    "verify": "tsc --noEmit && node scripts/check-worklets.mjs"
+    "check:pack": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-recents-pack.mjs",
+    "verify": "tsc --noEmit && node scripts/check-worklets.mjs && npm run check:pack --silent"
   },
   "jest": {
     "preset": "jest-expo"

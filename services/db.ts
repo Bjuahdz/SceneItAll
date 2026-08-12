@@ -95,6 +95,35 @@ const migrateInsights = async (db: SQLite.SQLiteDatabase): Promise<void> => {
   }
 };
 
+/**
+ * Same guarded pattern for `search_history` — devices that created it during the
+ * five-row era upgrade in place.
+ *
+ * · `hits`       — how many times this entity has been searched, ever. Every
+ *                  re-search used to be DISCARDED: the primary key is
+ *                  (entity_type, entity_id) and the write was INSERT OR REPLACE, so
+ *                  looking someone up ten times left one row and one timestamp. The
+ *                  frequency view Discover wants is worthless the day it ships and
+ *                  good a month later, so the counting has to start before the UI
+ *                  that reads it exists. Existing rows default to 1, which is the
+ *                  honest floor — we know they were searched at least once.
+ * · `session_id` — which search sitting this row belongs to, stamped in R2 when the
+ *                  COMPOSE state gives sessions a beginning and an end. Nullable
+ *                  because every row written before R2 has no session we can
+ *                  reconstruct, and guessing one from timestamp gaps would be
+ *                  fiction. The board's span gate reads this.
+ */
+const migrateSearchHistory = async (db: SQLite.SQLiteDatabase): Promise<void> => {
+  const cols = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(search_history)`);
+  const have = new Set(cols.map((c) => c.name));
+  if (!have.has("hits")) {
+    await db.execAsync(`ALTER TABLE search_history ADD COLUMN hits INTEGER NOT NULL DEFAULT 1`);
+  }
+  if (!have.has("session_id")) {
+    await db.execAsync(`ALTER TABLE search_history ADD COLUMN session_id INTEGER`);
+  }
+};
+
 const getDb = (): Promise<SQLite.SQLiteDatabase> => {
   if (!dbPromise) {
     dbPromise = SQLite.openDatabaseAsync("sceneitall.db").then(async (db) => {
@@ -153,9 +182,22 @@ const getDb = (): Promise<SQLite.SQLiteDatabase> => {
           created_at        INTEGER NOT NULL,
           arc_type          TEXT
         );
+        CREATE TABLE IF NOT EXISTS search_history (
+          entity_type   TEXT NOT NULL,
+          entity_id     INTEGER NOT NULL,
+          title         TEXT NOT NULL,
+          year          TEXT,
+          subtitle      TEXT,
+          image_path    TEXT,
+          searched_at   INTEGER NOT NULL,
+          hits          INTEGER NOT NULL DEFAULT 1,
+          session_id    INTEGER,
+          PRIMARY KEY (entity_type, entity_id)
+        );
       `);
       await migrateTakes(db);
       await migrateInsights(db);
+      await migrateSearchHistory(db);
       return db;
     });
   }
@@ -206,6 +248,161 @@ export const writePref = async (key: string, value: string): Promise<void> => {
   await db.runAsync("INSERT OR REPLACE INTO app_prefs (key, value) VALUES (?, ?)", [key, value]);
 };
 
+// ── Search history (the Search tab's recents ledger) ──────────────────────────
+// A real table rather than JSON in `app_prefs` because recents need three things a
+// string blob can't give: ordering, an entity type, and dedupe by entity.
+//
+// New table, so no ALTER migration exists or is needed — CREATE TABLE IF NOT EXISTS
+// in getDb() creates it on the next open for devices that already have the DB.
+
+// TMDB's own vocabulary, deliberately. The UI labels (FILM / SHOW / DIRECTOR /
+// COLLECTION / STUDIO) are derived at render — DIRECTOR in particular is not a type
+// at all, it's a person whose `known_for_department` is "Directing". Storing the
+// API's noun keeps one translation point instead of a lossy round-trip.
+export type SearchEntityType = "movie" | "tv" | "person" | "collection" | "company";
+
+// Everything the recents ledger needs to draw itself with ZERO network calls —
+// the default state is the first thing the user sees, so it must not wait on TMDB.
+export interface RecentSearch {
+  entity_type: SearchEntityType;
+  entity_id: number;
+  title: string;
+  /** Release year ("2021") for films/shows; a span or null for the other types. */
+  year: string | null;
+  /** Director for a film/show, `known_for_department` for a person, else null. */
+  subtitle: string | null;
+  /** Backdrop for film/tv/collection, profile for a person, null for a company
+   *  (studios never render TMDB logos — polarity is unknowable). */
+  image_path: string | null;
+  searched_at?: number; // epoch ms; present on rows read from the DB
+  /** How many times this entity has ever been searched. Present on rows read from
+   *  the DB; omitted on the entry handed to `recordRecentSearch`, which owns it. */
+  hits?: number;
+  /** The search sitting this row belongs to — see `migrateSearchHistory`. Null on
+   *  every row written before R2. */
+  session_id?: number | null;
+}
+
+/**
+ * ▸ A READ CAP, NOT A STORAGE CAP. That is the whole change in R1.
+ *
+ * This used to be 5 and was enforced on WRITE: every commit deleted everything past
+ * row five, so there was no archive behind the list — the table held exactly what the
+ * screen showed. That made the number impossible to raise later, because the history
+ * to raise it INTO had already been thrown away.
+ *
+ * Nothing is deleted now. `search_history` keeps one row per entity you have ever
+ * searched, forever; a heavy user accumulates a few thousand rows of short text,
+ * which SQLite does not notice. This constant only bounds how many the app reads
+ * into memory at once.
+ *
+ * 60 is deliberately interim. The open ruling is whether the recents board caps at
+ * ~20 with a SHOW ALL or scrolls indefinitely (see "Rulings needed before R4"), and
+ * 60 forecloses neither — it is twelve times the old ceiling, which is plenty to
+ * exercise the skyline packer, while staying far below the point where rendering
+ * needs virtualising.
+ */
+export const RECENTS_LIMIT = 60;
+
+/**
+ * `searched_at DESC` is the real ordering. `rowid DESC` is only a tiebreak.
+ *
+ * ⚠ That tiebreak changed meaning in R1 and the difference is worth knowing. Under
+ * INSERT OR REPLACE a refreshed row was deleted and re-inserted, so it earned a fresh
+ * (higher) rowid and the tiebreak tracked recency for free. The upsert below updates
+ * in PLACE to preserve `hits`, so a re-searched row keeps its original rowid — the
+ * tiebreak is no longer recency-meaningful.
+ *
+ * It is still DETERMINISTIC, which is the property that actually matters: the recents
+ * board's layout is a pure function of this order, so an unstable sort would let the
+ * board rearrange itself between launches — the one thing the packer must never do.
+ * Two rows can only tie here by sharing a millisecond, which two entity opens by hand
+ * cannot manage, so either resolution is defensible; being stable is not optional.
+ */
+export const getRecentSearches = async (): Promise<RecentSearch[]> => {
+  const db = await getDb();
+  return db.getAllAsync<RecentSearch>(
+    `SELECT entity_type, entity_id, title, year, subtitle, image_path,
+            searched_at, hits, session_id
+       FROM search_history
+      ORDER BY searched_at DESC, rowid DESC
+      LIMIT ?`,
+    [RECENTS_LIMIT]
+  );
+};
+
+/**
+ * A RANDOM draw from the whole archive, for the dev-panel demo arrivals.
+ *
+ * The table keeps one row per entity ever searched (see RECENTS_LIMIT — a read cap,
+ * not a storage cap), which is exactly the pool a fake session should sample: real
+ * entities with real artwork the cache has likely met before, zero network, zero
+ * fabrication. `ORDER BY RANDOM()` re-rolls per call, so every seeded session is a
+ * different composition.
+ */
+export const sampleSearchHistory = async (limit: number): Promise<RecentSearch[]> => {
+  const db = await getDb();
+  return db.getAllAsync<RecentSearch>(
+    `SELECT entity_type, entity_id, title, year, subtitle, image_path,
+            searched_at, hits, session_id
+       FROM search_history
+      ORDER BY RANDOM()
+      LIMIT ?`,
+    [limit]
+  );
+};
+
+/**
+ * Upsert against the (entity_type, entity_id) primary key. That key IS the dedupe:
+ * re-searching something you already looked up refreshes its stamp and moves it to
+ * the top rather than adding a second row.
+ *
+ * ⚠ NOT `INSERT OR REPLACE` any more, and the distinction is the point. REPLACE
+ * deletes the conflicting row and inserts a fresh one, which would reset `hits` to 1
+ * on every re-search — the counter would read "1" forever and we would have shipped
+ * the same bug in a new column. `ON CONFLICT DO UPDATE` mutates the existing row, so
+ * `hits = hits + 1` actually accumulates.
+ *
+ * The metadata is refreshed from `excluded` rather than left alone, because artwork
+ * paths and a film's director do change on TMDB, and the newer fetch is the better one.
+ */
+export const recordRecentSearch = async (entry: RecentSearch): Promise<void> => {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT INTO search_history
+       (entity_type, entity_id, title, year, subtitle, image_path,
+        searched_at, hits, session_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+     ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+       title       = excluded.title,
+       year        = excluded.year,
+       subtitle    = excluded.subtitle,
+       image_path  = excluded.image_path,
+       searched_at = excluded.searched_at,
+       session_id  = excluded.session_id,
+       hits        = hits + 1`,
+    [
+      entry.entity_type,
+      entry.entity_id,
+      entry.title,
+      entry.year ?? null,
+      entry.subtitle ?? null,
+      entry.image_path ?? null,
+      entry.searched_at ?? Date.now(),
+      entry.session_id ?? null,
+    ]
+  );
+  // NO PRUNE. The five-row trim that used to live here is gone — see RECENTS_LIMIT.
+};
+
+// Dev-panel blank slate, same contract as deleteAllFavorites — returns how many went.
+export const deleteAllRecentSearches = async (): Promise<number> => {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ entity_id: number }>("SELECT entity_id FROM search_history");
+  await db.runAsync("DELETE FROM search_history");
+  return rows.length;
+};
+
 // ── Takes (the "What's your take?" journal entries) ───────────────────────────
 // Append-only (many per movie, opinions over time). Movie title/poster are denormalized
 // like favorites so a takes list / Home feed renders without re-fetching from TMDB.
@@ -223,6 +420,20 @@ export interface TranscriptSegment {
   text: string;
 }
 
+/**
+ * ⚠ NOT RENAMED WITH THE REST OF THE VOCABULARY, ON PURPOSE (2026-08-07).
+ *
+ * The search surface moved FRANCHISE → COLLECTION everywhere. This one did NOT,
+ * because `"franchise"` here is a VALUE ALREADY WRITTEN INTO SQLITE by the takes
+ * enrichment pipeline — renaming the union without migrating the rows would leave
+ * every stored mention unmatched by a reader that no longer knows the word. It is
+ * also the data agent's schema, not the search surface's.
+ *
+ * Renaming it is its own increment: a migration (`UPDATE take_entities SET type =
+ * 'collection' WHERE type = 'franchise'`) plus the writers in services/claude.ts,
+ * services/genres.ts and services/entityMatch.ts, in one commit. Until then this
+ * word staying put is a deliberate seam, not a missed rename.
+ */
 export type TakeEntityType =
   | "director"
   | "actor"
@@ -232,7 +443,7 @@ export type TakeEntityType =
   | "movie"
   | "composer";
 
-// A person/studio/franchise/etc. the user mentioned in a take. `tmdbId` is set when
+// A person/studio/collection/etc. the user mentioned in a take. `tmdbId` is set when
 // the mention was matched against the movie's known TMDB metadata (services/genres.ts
 // roster); LLM-extracted extras (characters, other movies) usually carry none.
 export interface TakeEntity {
@@ -447,6 +658,34 @@ export const markTakeAudioMissing = async (id: number): Promise<void> => {
   await db.runAsync(
     "UPDATE takes SET enrich_status = 'audio_missing', enrich_error = NULL WHERE id = ?",
     [id]
+  );
+};
+
+// ── The vault (what Search needs to know about your own library) ─────────────
+// One row per film you have written about, with how many takes it holds.
+//
+// This backs two things at once and is queried as ONE statement for that reason:
+//   · the entry star — a film is starred when it appears here at all;
+//   · the sub-4-character path — below the TMDB floor we prefix-match this list
+//     instead of spending a request that cannot return the right answer anyway.
+export interface VaultFilm {
+  movie_id: number;
+  movie_title: string;
+  take_count: number;
+  last_take_at: number;
+}
+
+// MAX(created_at) sits in the SELECT list, not just the ORDER BY, deliberately:
+// with exactly one min/max aggregate present SQLite defines the bare `movie_title`
+// as coming from THAT row, so the title is the most recent one rather than an
+// arbitrary pick from the group.
+export const getVaultFilms = async (): Promise<VaultFilm[]> => {
+  const db = await getDb();
+  return db.getAllAsync<VaultFilm>(
+    `SELECT movie_id, movie_title, COUNT(*) AS take_count, MAX(created_at) AS last_take_at
+       FROM takes
+      GROUP BY movie_id
+      ORDER BY last_take_at DESC`
   );
 };
 
