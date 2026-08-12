@@ -103,6 +103,9 @@ export default function SubmittedState({
                   typeTag={typeLabel(r)}
                   title={r.title}
                   facts={facts}
+                  // The star must survive the unroll — a starred row expanding into
+                  // a card that lost the mark read as the entry disappearing.
+                  hasEntry={r.entityType === "movie" && entryIds.has(r.id)}
                   ctaLabel={ctaFor(r.entityType)}
                   // A stronger top stop than the default: over a bright sky the
                   // index and type tag were illegible at 0.40.
@@ -117,6 +120,7 @@ export default function SubmittedState({
                   typeTag={typeLabel(r)}
                   title={r.title}
                   facts={facts}
+                  hasEntry={r.entityType === "movie" && entryIds.has(r.id)}
                   ctaLabel={ctaFor(r.entityType)}
                   onPressCollapse={() => setOpenIndex(null)}
                   onPressCta={() => onOpen(r)}

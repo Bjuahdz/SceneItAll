@@ -2,18 +2,22 @@ import React, { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import EntryStar from "./EntryStar";
-import { ChevronDown } from "./glyphs";
 import { FONT, ROW, SEARCH_LAYOUT, SIGNAL, TRACK, TRACK2 } from "@/constants/signal";
 import { foldForMatch, type SearchResult } from "@/services/search";
 
 // One row of the results ladder. Text only — there is deliberately no artwork here;
 // the whole point of the state is a fast, quiet, scannable list.
 //
-// Anatomy, and the order matters:
-//   typing     [index 20][title + meta, flex 1][14px marker]
-//   submitted  [index 20][title + meta, flex 1][14px marker][13px chevron]
-// The marker slot ALWAYS occupies its 14px even when empty. Collapsing it when
-// there is no star is what breaks the meta lane across rows.
+// Anatomy (both modes, since 2026-08-12 — the entity filmography's grammar,
+// Bryan's consistency ruling):
+//   [index 20][title + meta, flex 1][year 40, right]
+// Films and shows carry their year in the right lane and only their kind below
+// the title; people, studios and collections keep their full `TYPE · detail`
+// meta and no right lane — they have no year, and reserving one would be dead
+// air on every such row. The entry star floats ABSOLUTE in the title→year gap
+// (nothing is ever reserved for it), and the submitted mode's down-chevron is
+// gone entirely — "people are already gonna know to tap on it." The old
+// trailing 14px marker slot died with it.
 //
 // ⚠ THE TWO MODES COLOUR THEMSELVES BY DIFFERENT RULES, and both are verified
 // against the boards — this is not an inconsistency to "fix":
@@ -68,6 +72,9 @@ export const typeLabel = (r: SearchResult): string =>
 // 38 is what a 10px mono line holds inside the card's 314px text column.
 const KNOWN_FOR_BUDGET = 40;
 const KNOWN_FOR_COUNT = 2;
+
+/** The right lane's width — FilmRow's own 40, so the two lists share one column. */
+const YEAR_W = 40;
 
 /**
  * The budget for an EXPANDED CARD's lane, which is tighter than a row's.
@@ -230,7 +237,11 @@ export default function ResultRow({
     () => splitTitle(result.title, query),
     [result.title, query]
   );
-  const meta = metaLine(result);
+  // Films/shows: kind below the title, year in the right lane. Everything else:
+  // the full meta line, no right lane. See the anatomy note up top.
+  const dated = result.entityType === "movie" || result.entityType === "tv";
+  const yearRight = dated ? result.year ?? "" : "";
+  const meta = dated ? typeLabel(result) : metaLine(result);
   const submitted = mode === "submitted";
 
   return (
@@ -241,9 +252,9 @@ export default function ResultRow({
       // The old rows were a bare <Link> with no label at all — a screen reader read
       // the raw title and nothing about what kind of thing it was, or that you had
       // already written about it.
-      accessibilityLabel={`${result.title}. ${meta.replace(/ · /g, ", ")}.${
-        hasEntry ? " You have an entry." : ""
-      }`}
+      accessibilityLabel={`${result.title}. ${meta.replace(/ · /g, ", ")}${
+        yearRight ? `, ${yearRight}` : ""
+      }.${hasEntry ? " You have an entry." : ""}`}
     >
       <Text style={[styles.index, submitted && !hasEntry && styles.indexDim]}>
         {String(index).padStart(2, "0")}
@@ -275,9 +286,20 @@ export default function ResultRow({
         </Text>
       </View>
 
-      <View style={styles.marker}>{hasEntry ? <EntryStar /> : null}</View>
+      {yearRight ? (
+        <Text style={[styles.year, submitted && !hasEntry && styles.metaDim]} numberOfLines={1}>
+          {yearRight}
+        </Text>
+      ) : null}
 
-      {submitted ? <ChevronDown color={hasEntry ? ROW.titleDim : ROW.indexDim} /> : null}
+      {/* The earned mark, floating in the title→year gap — absolute, so a starless
+          row is byte-identical in layout and nothing is ever reserved. Same berth
+          as the entity filmography's FilmRow. */}
+      {hasEntry && (
+        <View style={styles.entryMark} pointerEvents="none">
+          <EntryStar size={11} />
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -329,10 +351,25 @@ const styles = StyleSheet.create({
     letterSpacing: TRACK.micro10,
   },
   metaDim: { color: ROW.yearDim },
-  marker: {
-    width: SEARCH_LAYOUT.markerWidth,
+  // The right lane — films/shows only, mirroring FilmRow's year column exactly.
+  year: {
+    width: YEAR_W,
     flexShrink: 0,
-    alignItems: "center",
+    textAlign: "right",
+    color: SIGNAL.muted,
+    fontFamily: FONT.mono,
+    fontSize: 10,
+    lineHeight: 12,
+    letterSpacing: TRACK.micro10,
+  },
+  // The star's berth: centered in the title→year gap (the columns sit rowGap
+  // apart, an 11px star floats in that 14) — FilmRow's exact formula, so the
+  // mark sits in the same place on every list in the app.
+  entryMark: {
+    position: "absolute",
+    right: YEAR_W + (SEARCH_LAYOUT.rowGap - 11) / 2,
+    top: 0,
+    bottom: 0,
     justifyContent: "center",
   },
 });

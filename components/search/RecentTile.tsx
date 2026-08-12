@@ -16,6 +16,7 @@ import Animated, {
   type SharedValue,
 } from "react-native-reanimated";
 
+import EntryStar from "./EntryStar";
 import type { MarqueeRect, MarqueeRemeasure } from "./Marquee";
 import { FONT, GRAYSCALE, ROW, SEARCH_LAYOUT, SIGNAL, TRACK2, accentAlpha, groundAlpha } from "@/constants/signal";
 import { fingerprint, tileArtUri, type PositionedTile } from "@/services/recentsBoard";
@@ -318,6 +319,7 @@ const NO_TAP = (_w: LandWeight) => {};
 
 export default function RecentTile({
   tile,
+  hasEntry,
   scrollY,
   originY,
   viewportH,
@@ -329,6 +331,11 @@ export default function RecentTile({
   onLand,
 }: {
   tile: PositionedTile;
+  /** This film is in the vault — the tile wears the entry star as a corner badge.
+   *  Tiles are the one list surface with no year lane to put the star beside, so
+   *  the badge takes the artwork's top-right corner instead; legible bare because
+   *  tile art runs desaturated and the star is the accent. */
+  hasEntry: boolean;
   scrollY: SharedValue<number>;
   /** Where board space begins inside the scroll content — see RecentsBoard. */
   originY: number;
@@ -696,6 +703,20 @@ export default function RecentTile({
         </>
       )}
     </Pressable>
+    {/* The vault badge — a film you have journaled wears its star in the artwork's
+        top-right corner (tiles have no year lane to seat it beside). A SIBLING of
+        the Pressable, pointer-transparent like every other layer here, so it can
+        never poison the touch-derived rect. It rides the text reveal: nothing
+        readable appears while the picture is still defocused, and the mark is
+        readable. */}
+    {hasEntry && shape !== "wordmark" && (
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.entryBadge, { top: inset, right: inset }, textStyle]}
+      >
+        <EntryStar size={12} />
+      </Animated.View>
+    )}
     {/* ▸ INSIDE THE CLIP, and that is not a detail.
         When the clip moved inward for the bleeding ghost, this stayed on the wrapper —
         which no longer has a radius or an overflow, so a soft bloom became a HARD GREY
@@ -867,6 +888,8 @@ const styles = StyleSheet.create({
    *  FRONT of it, or the emergence reads as a card sliding under the furniture. */
   landingAbove: { zIndex: 10 },
   plate: { position: "absolute", gap: 4 },
+  /** The vault star's corner seat — position comes inline (the tile's own inset). */
+  entryBadge: { position: "absolute" },
   title: {
     color: ROW.titleOpen,
     fontFamily: FONT.display,

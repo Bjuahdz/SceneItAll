@@ -152,6 +152,7 @@ export default function DefaultState({
                     index={i + 1}
                     title={r.title}
                     facts={facts}
+                    hasEntry={r.entity_type === "movie" && entryIds.has(r.entity_id)}
                     ctaLabel={cta}
                     tone={r.entity_type === "person" ? "person" : "default"}
                     focusY={r.entity_type === "person" ? 0.16 : 0.5}
@@ -163,6 +164,7 @@ export default function DefaultState({
                     index={i + 1}
                     title={r.title}
                     facts={facts}
+                    hasEntry={r.entity_type === "movie" && entryIds.has(r.entity_id)}
                     ctaLabel={cta}
                     onPressCollapse={() => onOpenIndexChange(null)}
                     onPressCta={() => onOpenEntity(r)}

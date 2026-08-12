@@ -1,6 +1,7 @@
 import React from "react";
 import { Dimensions, Pressable, StyleSheet, Text, View } from "react-native";
 
+import EntryStar from "./EntryStar";
 import { ChevronRight, ChevronUp } from "./glyphs";
 import { FONT, MARQUEE, ROW, SEARCH_LAYOUT, SIGNAL, TRACK, TRACK2 } from "@/constants/signal";
 
@@ -23,6 +24,8 @@ interface Props {
   typeTag?: string;
   title: string;
   facts: string;
+  /** This film is in the vault — the star leads the facts lane, same as Marquee. */
+  hasEntry?: boolean;
   ctaLabel: string;
   onPressCollapse: () => void;
   onPressCta: () => void;
@@ -33,6 +36,7 @@ export default function NoArtworkPanel({
   typeTag,
   title,
   facts,
+  hasEntry,
   ctaLabel,
   onPressCollapse,
   onPressCta,
@@ -68,6 +72,7 @@ export default function NoArtworkPanel({
         {/* The same bottom lane as the marquee — facts left, verb right, one
             baseline. An artworkless row must not compose itself differently. */}
         <View style={styles.lane}>
+          {hasEntry ? <EntryStar size={11} /> : null}
           <Text style={styles.facts} numberOfLines={1}>
             {facts}
           </Text>

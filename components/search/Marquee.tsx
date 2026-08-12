@@ -124,6 +124,11 @@ interface Props {
   title: string;
   /** `2017 · VILLENEUVE`, or `12 FILMS · 4 WITH ENTRIES`. */
   facts: string;
+  /** This film is in the vault. The entry star leads the facts lane — the card was
+   *  the ONE place the mark vanished when a starred row unrolled (Bryan,
+   *  2026-08-12: "there is no star badge anymore"), and the star lives beside the
+   *  year everywhere else, which on this card means the front of the facts. */
+  hasEntry?: boolean;
   /** Aggregate take count on a person or collection: renders star + "9 TAKES". */
   takesLabel?: string;
   ctaLabel: string;
@@ -144,6 +149,7 @@ export default function Marquee({
   typeTag,
   title,
   facts,
+  hasEntry,
   takesLabel,
   ctaLabel,
   tone = "default",
@@ -326,6 +332,8 @@ export default function Marquee({
                 can afford to: a truncated known-for still names a film, whereas a
                 truncated verb names nothing. */}
             <View style={styles.factsRow}>
+              {/* The vault mark leads the lane — star, then year, the rows' grammar. */}
+              {hasEntry ? <EntryStar size={12} /> : null}
               {/* Hard-clamped to ONE line. The length budget upstream should keep it
                   inside, but a title nobody anticipated must truncate rather than
                   wrap and shove the lane taller. */}

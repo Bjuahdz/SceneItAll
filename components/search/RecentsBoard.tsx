@@ -114,6 +114,7 @@ const NO_ARRIVAL: Arrival = { delays: new Map(), shifts: new Map() };
 
 export default function RecentsBoard({
   recents,
+  entryIds,
   scrollY,
   onArrival,
   onAnchor,
@@ -121,6 +122,9 @@ export default function RecentsBoard({
   onTileLand,
 }: {
   recents: RecentSearch[];
+  /** The vault — film tiles you have journaled wear the entry star badge
+   *  (Bryan, 2026-08-12: "consistent visuals to the dynamic data"). */
+  entryIds: Set<number>;
   /** The screen's live scroll offset. Written from a plain onScroll prop, read only
    *  by worklets — see the note on it in the search screen. */
   scrollY: SharedValue<number>;
@@ -399,6 +403,7 @@ export default function RecentsBoard({
           <RecentTile
             key={tile.key}
             tile={tile}
+            hasEntry={tile.search.entity_type === "movie" && entryIds.has(tile.search.entity_id)}
             scrollY={scrollY}
             originY={SEARCH_LAYOUT.contentTop + boardTop}
             viewportH={viewportH}
