@@ -46,7 +46,9 @@ export default function SkeletonRows({ count = 5 }: { count?: number }) {
             <Animated.View style={[styles.title, { width: `${72 - (i % 3) * 14}%` }, breathe]} />
             <Animated.View style={[styles.meta, breathe]} />
           </View>
-          <View style={styles.marker} />
+          {/* The right lane's ghost — result rows carry their year there now (the
+              old trailing marker slot died with the 2026-08-12 star grammar). */}
+          <Animated.View style={[styles.year, breathe]} />
         </View>
       ))}
     </View>
@@ -70,5 +72,5 @@ const styles = StyleSheet.create({
   body: { flex: 1, gap: 6 },
   title: { ...bar, height: 19 },
   meta: { ...bar, height: 10, width: "38%" },
-  marker: { width: SEARCH_LAYOUT.markerWidth, flexShrink: 0 },
+  year: { ...bar, width: 40, height: 10, flexShrink: 0 },
 });
