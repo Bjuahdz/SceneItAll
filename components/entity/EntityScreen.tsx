@@ -689,9 +689,11 @@ export default function EntityScreen({
    *
    * ONE film open across the whole page, keyed by ID rather than index — a
    * filter or sort re-seating the list must never hand the open card to
-   * whichever film now occupies the old slot. UPCOMING rows stay plain and
-   * navigate: you cannot have a take on an unreleased film, and half of them
-   * have no artwork to unroll (FilmRow's own contract, unchanged).
+   * whichever film now occupies the old slot. UPCOMING unrolls too (Bryan,
+   * 2026-08-12: instant navigation there was the one inconsistent tap in the
+   * app — "that should be fixed so that it's more consistent"); an unreleased
+   * film without artwork lands on NoArtworkPanel like any other credit, and
+   * its lane reads the release month instead of a year.
    *
    * The director lane rides the same budget rule as the search flow: fetched
    * for the OPEN film only, cached per id for the life of the page — see
@@ -988,16 +990,18 @@ export default function EntityScreen({
                 {upcoming.length === 1 ? "PROJECT" : "PROJECTS"}
               </Text>
             </View>
-            {upcoming.map((f, i) => (
-              <FilmRow
-                key={f.id}
-                film={f}
-                index={i + 1}
-                hasEntry={false}
-                onPress={openFilm}
-                isLast={i === upcoming.length - 1}
-              />
-            ))}
+            {/* Same accordion as every other section — a project unrolls into its
+                marquee (or the dark panel when nothing is shot yet), DETAILS pushes
+                the sheet. Instant navigation here was the app's one inconsistent
+                tap; Bryan retired it 2026-08-12. */}
+            <FilmSlots
+              films={upcoming}
+              entryIds={entryIds}
+              openId={openFilmId}
+              onToggle={toggleFilm}
+              onDetails={openFilm}
+              director={director}
+            />
           </Animated.View>
         )}
 
@@ -1146,7 +1150,10 @@ function FilmSlots({
     <>
       {films.map((f, i) => {
         if (f.id === openId) {
-          const facts = f.year && director ? `${f.year} · ${director}` : f.year ?? "";
+          // Released cards date themselves by year; an unreleased one carries its
+          // release month — "when" is the useful fact for what hasn't come out.
+          const when = f.released ? f.year : f.releaseLabel ?? f.year;
+          const facts = when && director ? `${when} · ${director}` : when ?? "";
           return (
             <Animated.View key={f.id} layout={accordionMotion()} style={{ overflow: "hidden" }}>
               {f.imagePath ? (
@@ -1156,6 +1163,7 @@ function FilmSlots({
                   typeTag={f.isShow ? "SHOW" : "FILM"}
                   title={f.title}
                   facts={facts}
+                  hasEntry={entryIds.has(f.id)}
                   ctaLabel={ctaFor("movie")}
                   tone="submitted"
                   onPressCollapse={() => onToggle(f.id)}
@@ -1169,6 +1177,7 @@ function FilmSlots({
                   typeTag={f.isShow ? "SHOW" : "FILM"}
                   title={f.title}
                   facts={facts}
+                  hasEntry={entryIds.has(f.id)}
                   ctaLabel={ctaFor("movie")}
                   onPressCollapse={() => onToggle(f.id)}
                   onPressCta={() => onDetails(f)}

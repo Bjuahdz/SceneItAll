@@ -2,20 +2,32 @@ import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import EntryStar from "../search/EntryStar";
-import { ChevronRight } from "../search/glyphs";
 import { FONT, ROW, SEARCH_LAYOUT, SIGNAL } from "@/constants/signal";
 import type { EntityFilm } from "@/services/entities";
 
 // A row in an entity's filmography sheet. 56px, shorter than a search result row
-// because this list is long and the page already has a hero doing the talking.
+// — and DELIBERATELY so, re-affirmed by Bryan 2026-08-12 after he questioned the
+// difference and then answered it himself: a search result row stacks a meta line
+// (kind · year · format) UNDER its title, which is what buys its extra height;
+// this row is a single title lane with the year beside it, because format lives
+// in the page's filter sheet instead. Do not "fix" the size difference — the two
+// rows carry different cargo.
 //
-// Anatomy: [index 20][title flex 1][year 40, right][14px marker]
-// Upcoming swaps the marker for a bare chevron-right and widens the date lane to
-// 62 — "JUL 2026" needs the room, and "when" is the useful fact for something that
-// has not come out.
+// Anatomy: [index 20][title flex 1][year 40, right] — and nothing after the year.
+// The row used to end in a 14px marker slot reserved on EVERY row for the entry
+// star, which pushed the year lane in from the edge and read as dead air on the
+// ~all rows that had no star (Bryan, 2026-08-12: "weirdly spaced out"). The star
+// floats just LEFT OF THE YEAR now (his placement, corrected same day) — in the
+// gap the title and year columns already keep — so a journaled film wears its
+// mark by its year and every other row reserves nothing. Upcoming rows widen the
+// date lane to 62 ("JUL 2026" needs the room); their chevron-right died with the
+// marker: they unroll in place like every other row, no navigation to advertise.
 //
 // THE WHOLE ROW DIMS, not just the title. A film you have not journaled drops its
 // index and year with its title; that is what makes the sheet scannable at a glance.
+
+// The released year lane's width — the star's berth is measured off it.
+const YEAR_W = 40;
 
 interface Props {
   film: EntityFilm;
@@ -26,8 +38,6 @@ interface Props {
 }
 
 export default function FilmRow({ film, index, hasEntry, onPress, isLast }: Props) {
-  // You cannot have a take on something unreleased, so an upcoming row is never
-  // expandable — it navigates. Chevron-right, never chevron-down.
   const upcoming = !film.released;
   const dim = upcoming || !hasEntry;
 
@@ -55,10 +65,12 @@ export default function FilmRow({ film, index, hasEntry, onPress, isLast }: Prop
         {upcoming ? film.releaseLabel : film.year}
       </Text>
 
-      {upcoming ? (
-        <ChevronRight size={13} color={ROW.indexDim} />
-      ) : (
-        <View style={styles.marker}>{hasEntry ? <EntryStar /> : null}</View>
+      {/* The earned mark, in the margin the columns already keep — absolute, so a
+          starless row is byte-identical in layout and nothing is ever reserved. */}
+      {hasEntry && (
+        <View style={styles.entryMark} pointerEvents="none">
+          <EntryStar size={11} />
+        </View>
       )}
     </Pressable>
   );
@@ -94,7 +106,7 @@ const styles = StyleSheet.create({
   },
   titleDim: { color: ROW.titleDim },
   year: {
-    width: 40,
+    width: YEAR_W,
     flexShrink: 0,
     textAlign: "right",
     color: SIGNAL.muted,
@@ -105,10 +117,16 @@ const styles = StyleSheet.create({
   },
   yearDim: { color: ROW.yearDim },
   dateWide: { width: 62 },
-  marker: {
-    width: SEARCH_LAYOUT.markerWidth,
-    flexShrink: 0,
-    alignItems: "center",
+  // The star's berth: centered in the title→year gap (the columns sit rowGap
+  // apart, an 11px star floats in that 14), so it reads as the year's mark —
+  // Bryan's corrected placement. Vertically centered on the row so a two-line
+  // title carries the mark at its middle. Anchored off the RELEASED lane width
+  // on purpose: upcoming rows can never have entries.
+  entryMark: {
+    position: "absolute",
+    right: YEAR_W + (SEARCH_LAYOUT.rowGap - 11) / 2,
+    top: 0,
+    bottom: 0,
     justifyContent: "center",
   },
 });
