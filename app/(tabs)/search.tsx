@@ -1238,6 +1238,7 @@ export default function SearchScreen() {
               // mount-time by design. 0 forever in normal use.
               key={demoEpoch}
               recents={recents}
+              entryIds={entryIds}
               scrollY={scrollY}
               onArrival={onArrival}
               onAnchor={onAnchorScroll}
