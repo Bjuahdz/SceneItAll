@@ -1,15 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import {
   View,
   Text,
   ActivityIndicator,
-  FlatList,
   Image,
   ScrollView,
-  Pressable,
   StyleSheet,
-  Modal,
-  TextInput,
   NativeSyntheticEvent,
   NativeScrollEvent,
   LayoutChangeEvent,
@@ -19,7 +15,6 @@ import {
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
 import MaskedView from "@react-native-masked-view/masked-view";
-import { Ionicons } from "@expo/vector-icons";
 import Animated, {
   FadeInDown,
   interpolate,
@@ -28,7 +23,6 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
 
 import useFetch from "@/services/useFetch";
 import {
@@ -52,10 +46,6 @@ import MinimalMovieSection from "@/components/homepage/MinimalMovieSection";
 import { Movie, TrendingMovie } from "@/interfaces/interfaces";
 
 const ACCENT = "#9ccadf";
-
-// Cap the popup result list so the card stays "small" and never runs under the
-// keyboard (it's anchored near the top).
-const POPUP_LIST_MAX_HEIGHT = 340;
 
 // ── The top-edge glass (replaced the old header card, Bryan 2026-08-12) ──────
 // The matte's SOLID band runs the status bar plus this much — through the media
@@ -147,27 +137,19 @@ function SearchEntry({
 }
 
 /**
- * Search tab = the former home discovery layout (kept full-bleed) under a subtle
- * blurred header. The header slides in once on load; tapping its search bar opens
- * an in-place frosted popup (no navigation) for live search + results.
+ * The Discover tab = the former home discovery layout (kept full-bleed) under the
+ * masked-glass header. Search left this page entirely — it lives in the nav's
+ * island now, and the in-place popup this file used to carry (state, debounce,
+ * its own fetchMovies call, a screen of styles) was deleted 2026-08-12 as part
+ * of the pre-publish dead-end sweep: none of it had rendered since the popup's
+ * Modal was removed.
  */
 const Search = () => {
   const insets = useSafeAreaInsets();
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
 
   // Nav pill morph: this screen's scroll drives the collapse/expand of the floating nav.
   const { makeScrollHandler } = useNavMorph();
   const navScroll = useMemo(() => makeScrollHandler(), [makeScrollHandler]);
-
-  // --- Search (manual fetch, debounced below) ---
-  const {
-    data: searchResults = [],
-    loading: searchLoading,
-    error: searchError,
-    refetch: loadMovies,
-    reset,
-  } = useFetch(() => fetchMovies({ query: searchQuery }), false);
 
   // --- Discovery data ---
   const { data: trendingMovies, loading: trendingLoading, error: trendingError } = useFetch(getTrendingMovies);
@@ -200,30 +182,10 @@ const Search = () => {
   const discoveryError =
     nowPlayingError || trendingError || upcomingError || boxOfficeError || minimalSectionsError;
 
-  // Debounce the query; keep feeding the trending counter on results.
-  useEffect(() => {
-    const timeoutId = setTimeout(async () => {
-      if (searchQuery.trim()) {
-        await loadMovies();
-      } else {
-        reset();
-      }
-    }, 500);
-
-    return () => clearTimeout(timeoutId);
-  }, [searchQuery]);
-
   // (This tab used to write the most-searched ledger here — the top result at
   // type-time, a guess. The ledger went click-recorded 2026-08-10 (see
   // services/appwrite.ts) and this legacy tab lost its pen: it still READS the
   // trending row, it just no longer pollutes it.)
-
-  const openSearch = useCallback(() => setSearchOpen(true), []);
-  const closeSearch = useCallback(() => {
-    setSearchOpen(false);
-    setSearchQuery("");
-    reset();
-  }, [reset]);
 
   // The scroll drives the header from one plain JS onScroll. Two facts come out
   // of it, each written only when it changes or per-frame into a shared value —
@@ -561,21 +523,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     color: "rgba(156,202,223,0.45)",
   },
-  searchBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-  },
-  searchBarText: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 13,
-  },
   // The masked glass band. OUTSIDE the header's own box so its ramp can run past
   // the content without an overflow game; under the header in z so the tabs are
   // never blurred by their own bar. Its height is inline (it needs insets.top).
@@ -596,103 +543,4 @@ const styles = StyleSheet.create({
     // to give the hard-edged treatment somewhere to end. The mask has no edge.
   },
 
-  // --- Search popup ---
-  popupDim: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.35)",
-  },
-  popupWrap: {
-    ...StyleSheet.absoluteFillObject,
-    paddingHorizontal: 12,
-  },
-  popupCard: {
-    borderRadius: 18,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(18,18,24,0.6)",
-  },
-  popupInputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  popupInput: {
-    flex: 1,
-    color: "#fff",
-    fontSize: 15,
-    padding: 0,
-  },
-  popupCancelBtn: {
-    marginLeft: 2,
-  },
-  popupCancel: {
-    color: ACCENT,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  popupDivider: {
-    height: 1,
-    backgroundColor: "rgba(255,255,255,0.08)",
-  },
-  popupState: {
-    paddingVertical: 26,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  popupHint: {
-    color: "rgba(255,255,255,0.45)",
-    fontSize: 14,
-  },
-  popupSectionLabel: {
-    color: "rgba(255,255,255,0.5)",
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0.6,
-    textTransform: "uppercase",
-    paddingHorizontal: 14,
-    paddingTop: 10,
-    paddingBottom: 4,
-  },
-  popupError: {
-    color: "#ff6b6b",
-    fontSize: 14,
-  },
-  resultRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  resultThumb: {
-    width: 42,
-    height: 63,
-    borderRadius: 6,
-    backgroundColor: "rgba(255,255,255,0.06)",
-  },
-  resultInfo: {
-    flex: 1,
-  },
-  resultTitle: {
-    color: "#fff",
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  resultMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    marginTop: 4,
-  },
-  resultMeta: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 12,
-  },
-  resultMetaDot: {
-    color: "rgba(255,255,255,0.35)",
-    fontSize: 12,
-  },
 });
