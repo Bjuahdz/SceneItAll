@@ -2,7 +2,7 @@
 // Deterministic entity matching (Phase 3b, first pass).
 //
 // Transcripts get matched against the movie's KNOWN roster (director, composer,
-// top cast, studio, franchise — services/genres.ts) BEFORE any LLM sees them:
+// top cast, studio, collection — services/genres.ts) BEFORE any LLM sees them:
 // string matching is free, instant, and carries TMDB ids. The LLM only fills in
 // what string matching can't resolve (characters, other movies, unlisted names).
 //
@@ -124,8 +124,8 @@ export const matchRosterInTranscript = (
     if (padded.includes(` ${name} `)) {
       confidence = 1;
     }
-    // 1b) Franchises are catalogued as "X Collection" but spoken as "X".
-    if (!confidence && known.kind === "franchise" && name.endsWith(" collection")) {
+    // 1b) Collections are catalogued as "X Collection" but spoken as "X".
+    if (!confidence && known.kind === "collection" && name.endsWith(" collection")) {
       const bare = name.slice(0, -" collection".length);
       if (bare.length >= 3 && padded.includes(` ${bare} `)) confidence = 0.9;
     }

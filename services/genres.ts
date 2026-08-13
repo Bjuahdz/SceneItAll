@@ -55,7 +55,7 @@ const getGenreMap = (): Promise<Map<number, string>> => {
 // Phase 3 entity extractor matches transcripts against before ever asking an LLM.
 // `kind` values are a subset of TakeEntityType in services/db.ts.
 export interface KnownEntity {
-  kind: "director" | "composer" | "actor" | "studio" | "franchise";
+  kind: "director" | "composer" | "actor" | "studio" | "collection";
   name: string;
   tmdbId: number | null;
 }
@@ -65,8 +65,8 @@ export interface MovieMeta {
   director: string | null;
   actors: string[]; //          top-billed (first 3)
   studio: string | null; //     first production company
-  franchise: string | null; //  belongs_to_collection name
-  roster: KnownEntity[]; //     director/composer/top cast/studio/franchise WITH ids (Phase 3)
+  collection: string | null; // belongs_to_collection name
+  roster: KnownEntity[]; //     director/composer/top cast/studio/collection WITH ids (Phase 3)
 }
 
 const movieMetaCache = new Map<number, MovieMeta>();
@@ -105,20 +105,20 @@ const getMovieMeta = async (movieId: number): Promise<MovieMeta> => {
       if (c.name) roster.push({ kind: "actor", name: c.name, tmdbId: c.id ?? null });
     }
     if (studio?.name) roster.push({ kind: "studio", name: studio.name, tmdbId: studio.id ?? null });
-    if (collection?.name) roster.push({ kind: "franchise", name: collection.name, tmdbId: collection.id ?? null });
+    if (collection?.name) roster.push({ kind: "collection", name: collection.name, tmdbId: collection.id ?? null });
 
     const meta: MovieMeta = {
       genreIds,
       director: director?.name ?? null,
       actors: cast.slice(0, 3).map((c) => c.name ?? "").filter(Boolean),
       studio: studio?.name ?? null,
-      franchise: collection?.name ?? null,
+      collection: collection?.name ?? null,
       roster,
     };
     movieMetaCache.set(movieId, meta);
     return meta;
   } catch {
-    return { genreIds: [], director: null, actors: [], studio: null, franchise: null, roster: [] };
+    return { genreIds: [], director: null, actors: [], studio: null, collection: null, roster: [] };
   }
 };
 

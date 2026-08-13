@@ -62,7 +62,7 @@ const ENTITY_TYPES = [
   "actor",
   "character",
   "studio",
-  "franchise",
+  "collection",
   "movie",
   "composer",
 ] as const;
@@ -85,7 +85,8 @@ const ENRICHMENT_TOOL = {
         description:
           "Film-related mentions NOT in the provided known list: fictional characters " +
           "and notable in-world elements (places, factions) as type 'character', other " +
-          "movies as 'movie', plus any unlisted real people/studios/franchises.",
+          "movies as 'movie', film series and franchises as 'collection' (TMDB's word " +
+          "for them), plus any unlisted real people or studios.",
         items: {
           type: "object",
           additionalProperties: false,

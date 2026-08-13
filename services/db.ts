@@ -421,25 +421,39 @@ export interface TranscriptSegment {
 }
 
 /**
- * ⚠ NOT RENAMED WITH THE REST OF THE VOCABULARY, ON PURPOSE (2026-08-07).
+ * ⚠ THE STORED VOCABULARY CAUGHT UP LATE (2026-08-13). Read this before writing
+ * a migration for it — the obvious one does not apply.
  *
- * The search surface moved FRANCHISE → COLLECTION everywhere. This one did NOT,
- * because `"franchise"` here is a VALUE ALREADY WRITTEN INTO SQLITE by the takes
- * enrichment pipeline — renaming the union without migrating the rows would leave
- * every stored mention unmatched by a reader that no longer knows the word. It is
- * also the data agent's schema, not the search surface's.
+ * The search surface moved FRANCHISE → COLLECTION on 2026-08-07 (TMDB catalogues
+ * them as collections, and that is the word someone has to type to find one; see
+ * hooks/useFilterState.ts). This union lagged behind, because unlike the search
+ * surface's vocabulary `"franchise"` was a value ALREADY WRITTEN INTO SQLITE by
+ * the takes enrichment pipeline — renaming the union alone would have left every
+ * stored mention unmatched by a reader that no longer knew the word.
  *
- * Renaming it is its own increment: a migration (`UPDATE take_entities SET type =
- * 'collection' WHERE type = 'franchise'`) plus the writers in services/claude.ts,
- * services/genres.ts and services/entityMatch.ts, in one commit. Until then this
- * word staying put is a deliberate seam, not a missed rename.
+ * It now says `"collection"`, and PRE-RENAME ROWS ARE NORMALISED ON READ rather
+ * than migrated. Why read-time and not `UPDATE`:
+ *
+ *   · THERE IS NO ENTITY TABLE to update. Mentions live as a JSON blob in
+ *     `takes.entities` (TEXT), so a migration means parsing and rewriting every
+ *     take's payload — work that can fail half-way and leave the table in two
+ *     vocabularies at once, which is the exact state the seam existed to avoid.
+ *   · NOTHING READS THE VALUE TODAY. Both consumers of stored entities
+ *     (services/fingerprint.ts, services/onePick.ts) filter to person types —
+ *     director, actor, composer — so collection mentions are written and never
+ *     looked at. Paying migration risk for a value with no readers is a bad
+ *     trade; a read-time map cannot half-apply and costs one pass over a
+ *     handful of rows.
+ *
+ * The map lives in `parseTakeEntities` below — the single door every reader goes
+ * through. Any future stored-vocabulary rename belongs there for the same reason.
  */
 export type TakeEntityType =
   | "director"
   | "actor"
   | "character"
   | "studio"
-  | "franchise"
+  | "collection"
   | "movie"
   | "composer";
 
@@ -547,8 +561,22 @@ const parseJson = <T>(raw: string | null): T | null => {
 };
 export const parseTakeSegments = (t: Take): TranscriptSegment[] | null =>
   parseJson<TranscriptSegment[]>(t.transcript_segments);
-export const parseTakeEntities = (t: Take): TakeEntity[] | null =>
-  parseJson<TakeEntity[]>(t.entities);
+/**
+ * ⚠ THE ONE PLACE THAT STILL KNOWS THE WORD "franchise" — see TakeEntityType.
+ * Rows written before 2026-08-13 carry the pre-rename type; they are mapped to
+ * `"collection"` here so no caller ever has to care which era a take is from.
+ *
+ * The Array.isArray guard honours this section's stated contract (bad payload →
+ * null, never a throw): a blob that parsed but is not an array would otherwise
+ * throw on `.map` instead of failing quietly like malformed JSON already does.
+ */
+export const parseTakeEntities = (t: Take): TakeEntity[] | null => {
+  const rows = parseJson<TakeEntity[]>(t.entities);
+  if (!Array.isArray(rows)) return null;
+  return rows.map((e) =>
+    (e.type as string) === "franchise" ? { ...e, type: "collection" as const } : e
+  );
+};
 export const parseTakeTopics = (t: Take): TakeTopic[] | null => parseJson<TakeTopic[]>(t.topics);
 
 export interface NewTake {
