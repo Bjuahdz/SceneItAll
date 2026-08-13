@@ -13,7 +13,7 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSharedValue, useFrameCallback, runOnJS } from "react-native-reanimated";
 
-import { clamp01, rgba, seed, tintHex, ACCENT_HEX, type CloudData } from "./skyModel";
+import { rgba, seed, tintHex, ACCENT_HEX, type CloudData } from "./skyModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ENGINE A · THE CLOUDBANK — the Home screen (home_reference.js §8–§10,
@@ -52,7 +52,6 @@ interface CloudbankProps {
   data: CloudData;
   width: number;
   height: number;
-  selected: number;
   active?: boolean;
   onSelect?: (index: number) => void;
   onExplore?: () => void;
@@ -519,7 +518,6 @@ export default function CloudbankCanvas({
   data,
   width,
   height,
-  selected,
   active = true,
   onSelect,
   onExplore,

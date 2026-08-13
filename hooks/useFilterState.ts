@@ -128,16 +128,6 @@ export type StatusKey = (typeof STATUS_CYCLE)[number];
 /** The superset, so both cycles' members are valid keys. */
 export type KindKey = (typeof SEARCH_KIND_CYCLE)[number];
 
-/**
- * Is this selection something a FILM can be? ANY, FILM and SHOWS are answered by
- * the rows in a filmography; PEOPLE, STUDIOS and COLLECTIONS are not, and that
- * single distinction is what every other control keys off — a film cannot match
- * "studio", and none of the film questions (status, decade, rating, genre) has
- * anything to say once one of the three is chosen.
- */
-export const isMediaKind = (k: KindKey): boolean =>
-  k === "any" || k === "film" || k === "shows";
-
 export type FilterState = {
   sort: SortKey;
   /**

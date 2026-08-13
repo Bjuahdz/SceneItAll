@@ -634,15 +634,6 @@ export const updateTakeSpoiler = async (id: number, isSpoiler: boolean): Promise
   await db.runAsync("UPDATE takes SET is_spoiler = ? WHERE id = ?", [isSpoiler ? 1 : 0, id]);
 };
 
-// Replace a take's tag list (ENTRIES tab tag editor). Empty list clears to null.
-export const updateTakeTags = async (id: number, tags: string[]): Promise<void> => {
-  const db = await getDb();
-  await db.runAsync("UPDATE takes SET tags = ? WHERE id = ?", [
-    tags.length ? JSON.stringify(tags) : null,
-    id,
-  ]);
-};
-
 // ── Enrichment pipeline writes (driven by services/enrichment.ts) ─────────────
 
 // Point a take at its rescued/moved audio file (legacy temp-URI sweep).

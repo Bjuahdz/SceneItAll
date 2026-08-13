@@ -25,7 +25,6 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
-  type SharedValue,
 } from "react-native-reanimated";
 
 import { SIGNAL } from "@/constants/signal";

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Keyboard, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -29,6 +29,7 @@ import type { MarqueeRect, MarqueeRemeasure } from "@/components/search/Marquee"
 import FilterSheet from "@/components/entity/FilterSheet";
 import { BANDS_FOR } from "@/constants/filterBands";
 import { EntityOverlayHost, useEntityOverlay } from "@/contexts/EntityOverlayContext";
+import { useMovieSheet } from "@/contexts/MovieSheetContext";
 import { useSearchIsland } from "@/contexts/SearchIslandContext";
 import { prefetchEntity } from "@/services/entities";
 import ArrivalAurora from "@/components/search/ArrivalAurora";
@@ -241,7 +242,6 @@ export default function SearchScreen() {
     phase,
     results,
     resultsQuery,
-    total,
     submitted,
     error,
     suggestions,
@@ -426,6 +426,7 @@ export default function SearchScreen() {
     open: openOverlay,
     isOpen: overlayOpen,
     close: closeOverlay,
+    requestFold,
     filterOpen,
     closeFilter,
   } = useEntityOverlay();
@@ -460,6 +461,39 @@ export default function SearchScreen() {
     openIsland();
     closeOverlay();
   }, [openIsland, closeOverlay]);
+
+  // ── THE GROUND'S EXIT, for the movie sheet's escape cascade ────────────────
+  // A chain can BEGIN here: open a person from the results, then start opening
+  // their films. Every sheet in that tower folds its own hosted page as it
+  // leaves, but this first page is hosted by THIS screen, so without the
+  // registration below the cascade emptied the tower and left it standing —
+  // the same gesture ending on a tab from Discover and on a page from search.
+  // It folds the way it always does (into the card it grew from), and resolves
+  // once the overlay is actually gone, so the cascade's last beat is this one
+  // rather than a race with it.
+  const { registerGroundExit } = useMovieSheet();
+  const overlayOpenRef = useRef(overlayOpen);
+  overlayOpenRef.current = overlayOpen;
+  const groundFoldWaiter = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!overlayOpen && groundFoldWaiter.current) {
+      groundFoldWaiter.current();
+      groundFoldWaiter.current = null;
+    }
+  }, [overlayOpen]);
+  const groundExit = useCallback(async () => {
+    if (!overlayOpenRef.current) return;
+    await new Promise<void>((resolve) => {
+      groundFoldWaiter.current = resolve;
+      requestFold();
+    });
+  }, [requestFold]);
+  const groundExitRef = useRef(groundExit);
+  groundExitRef.current = groundExit;
+  useEffect(
+    () => registerGroundExit(() => groundExitRef.current()),
+    [registerGroundExit]
+  );
 
   // The list's offset, tracked so it can be FROZEN the instant an entity opens.
   // A tap can land while the list is still settling — late deceleration, the

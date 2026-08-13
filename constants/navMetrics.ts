@@ -81,6 +81,12 @@ export const NAV_FILTER_RECT = {
   height: NAV_BAR_H,
 };
 
+/** How far below its seat the FILTER pill starts its rise — a bubble surfacing,
+ *  not a slide-in from offscreen. Shared because TWO pills perform this entrance
+ *  (the nav's own, and the sheet-borne entity page's) and they must arrive
+ *  identically or read as two different controls. */
+export const NAV_FILTER_RISE = px(18);
+
 // ── Material. The glass is one recipe: a tint over a blur, and a single hairline rim.
 export const NAV_GLASS_TINT = "rgba(15, 15, 20, 0.45)";
 export const NAV_GLASS_RIM = "rgba(255, 255, 255, 0.08)";
