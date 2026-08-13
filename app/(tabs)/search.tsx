@@ -35,7 +35,6 @@ import { prefetchEntity } from "@/services/entities";
 import ArrivalAurora from "@/components/search/ArrivalAurora";
 import BackToRecent, { DOOR_BLOCK } from "@/components/search/BackToRecent";
 import ComposeState from "@/components/search/ComposeState";
-import DefaultState from "@/components/search/DefaultState";
 import QuickSearches from "@/components/search/QuickSearches";
 import EmptyState from "@/components/search/EmptyState";
 import ResultRow from "@/components/search/ResultRow";
@@ -52,7 +51,6 @@ import { updateSearchCount } from "@/services/appwrite";
 import { useBoolPref } from "@/hooks/useBoolPref";
 import {
   PREF_ANCHOR_GUIDE,
-  PREF_BENTO_RECENTS,
   PREF_DEMO_ARRIVALS,
   PREF_LAND_HAPTICS,
 } from "@/services/prefs";
@@ -259,20 +257,6 @@ export default function SearchScreen() {
   const { entryIds } = useVault();
   const router = useRouter();
   /**
-   * Which recents row is expanded — owned HERE rather than inside DefaultState.
-   *
-   * DefaultState used to stay mounted while the keyboard was up and merely derive
-   * everything closed, precisely so that dismissing the keyboard returned you to the
-   * row you had open instead of snapping back to 01. COMPOSE unmounts it instead, so
-   * that state has to live somewhere that survives.
-   *
-   * ⚠ TEMPORARY. This dies with DefaultState at R4 — the recents board has no
-   * accordion at all, because every tile is already the artwork the marquee existed
-   * to reveal.
-   */
-  const [recentsOpenIndex, setRecentsOpenIndex] = useState<number | null>(0);
-  const bentoRecents = useBoolPref(PREF_BENTO_RECENTS, false);
-  /**
    * ▸ DEV: DEMO ARRIVALS — a fake sitting on every return to the tab.
    *
    * Iterating the arrival by hand meant searching eight things to see one cascade
@@ -317,12 +301,12 @@ export default function SearchScreen() {
       seededFocus.current = false;
       return;
     }
-    // Gated on the BOARD being the resting surface — the arrival only exists there,
-    // and seeding fake rows into the plain ledger would be pollution with no payoff.
-    if (!demoArrivals || !bentoRecents || seededFocus.current) return;
+    // The board is the resting surface unconditionally now (the ledger it used to
+    // A/B against was deleted 2026-08-13), so the arrival needs no surface gate.
+    if (!demoArrivals || seededFocus.current) return;
     seededFocus.current = true;
     seedDemoArrival();
-  }, [isFocused, demoArrivals, bentoRecents, seedDemoArrival]);
+  }, [isFocused, demoArrivals, seedDemoArrival]);
   // Flipping the toggle OFF is "back to my real board" — the fake rows leave with it.
   // Also runs at mount, where it is a no-op on a clean ledger.
   useEffect(() => {
@@ -1255,42 +1239,29 @@ export default function SearchScreen() {
       // leaving, so the board mounts and fades in over the descent instead of after
       // it. See the note on `kbLeaving`.
       if (composing) return <ComposeState />;
-      // A fresh account has no recents AND no takes, so there is no honest ONE PICK
-      // and no ledger — it gets the board that teaches the loop instead.
+      // A fresh account has nothing to show, so it gets the board that teaches the
+      // loop instead.
       if (recents.length === 0) return <EmptyState />;
-      // A/B against the ledger while the board is being built — see PREF_BENTO_RECENTS.
-      if (bentoRecents) {
-        return (
-          // The wrapper carries the dissolve, NOT the board — the board's own mount is
-          // what starts an arrival, and it must keep remounting on `demoEpoch` exactly
-          // as before. A plain animated view at the same position leaves `boardTop`
-          // and every tile's screen maths untouched.
-          <Animated.View entering={BOARD_IN} exiting={BOARD_OUT}>
-            <RecentsBoard
-              // The demo epoch forces a REMOUNT per seeded session: the tab screen
-              // stays alive across tab switches, and the arrival machinery is
-              // mount-time by design. 0 forever in normal use.
-              key={demoEpoch}
-              recents={recents}
-              entryIds={entryIds}
-              scrollY={scrollY}
-              onArrival={onArrival}
-              onAnchor={onAnchorScroll}
-              onOpenEntity={onOpenRecent}
-              onTileLand={onTileLand}
-            />
-          </Animated.View>
-        );
-      }
       return (
-        <DefaultState
-          recents={recents}
-          entryIds={entryIds}
-          openIndex={recentsOpenIndex}
-          onOpenIndexChange={setRecentsOpenIndex}
-          onOpenEntity={onOpenRecent}
-          onOpenPick={(id) => router.push(`/movie/${id}`)}
-        />
+        // The wrapper carries the dissolve, NOT the board — the board's own mount is
+        // what starts an arrival, and it must keep remounting on `demoEpoch` exactly
+        // as before. A plain animated view at the same position leaves `boardTop`
+        // and every tile's screen maths untouched.
+        <Animated.View entering={BOARD_IN} exiting={BOARD_OUT}>
+          <RecentsBoard
+            // The demo epoch forces a REMOUNT per seeded session: the tab screen
+            // stays alive across tab switches, and the arrival machinery is
+            // mount-time by design. 0 forever in normal use.
+            key={demoEpoch}
+            recents={recents}
+            entryIds={entryIds}
+            scrollY={scrollY}
+            onArrival={onArrival}
+            onAnchor={onAnchorScroll}
+            onOpenEntity={onOpenRecent}
+            onTileLand={onTileLand}
+          />
+        </Animated.View>
       );
     }
 
@@ -1573,7 +1544,7 @@ export default function SearchScreen() {
           layout-only). Over the glass so the text is never blurred by its own bar,
           under the light. Mounted only while the board is the body — it must never
           hover over search results. */}
-      {bentoRecents && phase === "idle" && query.trim().length === 0 && (
+      {phase === "idle" && query.trim().length === 0 && (
         <View style={styles.morphHead} pointerEvents="none">
           <Animated.Text
             onLayout={(e) => setMorphTitleW(e.nativeEvent.layout.width)}

@@ -18,7 +18,6 @@ import { emitChanged } from "@/services/enrichment";
 import {
   PREF_ANCHOR_GUIDE,
   PREF_ANCHOR_SKYLINE,
-  PREF_BENTO_RECENTS,
   PREF_LAND_HAPTICS,
   PREF_DEMO_ARRIVALS,
   PREF_DEMO_ARRIVAL_MAX,
@@ -223,7 +222,6 @@ export default function SettingsScreen() {
   // flip. One subscription, both ends.
   const showShorts = useBoolPref(PREF_SHOW_SHORTS, true);
   const showDocs = useBoolPref(PREF_SHOW_DOCS, true);
-  const bentoRecents = useBoolPref(PREF_BENTO_RECENTS, false);
   const demoArrivals = useBoolPref(PREF_DEMO_ARRIVALS, false);
   const anchorSkyline = useBoolPref(PREF_ANCHOR_SKYLINE, false);
   const anchorGuide = useBoolPref(PREF_ANCHOR_GUIDE, false);
@@ -454,13 +452,6 @@ export default function SettingsScreen() {
             danger
             busy={clearingRecents}
             onPress={confirmClearRecents}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            icon="grid-outline"
-            label="Bento recents board"
-            value={bentoRecents}
-            onValueChange={(v) => setBoolPref(PREF_BENTO_RECENTS, v)}
           />
           <View style={styles.divider} />
           {/* Fakes the SEARCHES, not the animation — 8–11 real entities from the
