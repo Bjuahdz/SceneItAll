@@ -1,9 +1,9 @@
 import { View, Dimensions, ActivityIndicator, Text, ScrollView, Pressable, StyleSheet, StatusBar, NativeSyntheticEvent, NativeScrollEvent } from 'react-native'
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import ReAnimated, { useSharedValue, useDerivedValue, useAnimatedStyle, interpolate, Extrapolation, withSpring, withTiming, withSequence, Easing, FadeInDown, FadeOut, runOnJS, type EntryAnimationsValues, type ExitAnimationsValues, type SharedValue } from 'react-native-reanimated';
+import ReAnimated, { useSharedValue, useDerivedValue, useAnimatedProps, useAnimatedReaction, useAnimatedStyle, interpolate, Extrapolation, withSpring, withTiming, withSequence, Easing, FadeInDown, FadeOut, runOnJS, type EntryAnimationsValues, type ExitAnimationsValues, type SharedValue } from 'react-native-reanimated';
 import { Gesture, GestureDetector, type PanGesture } from 'react-native-gesture-handler';
-import React, { useState, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import useFetch from '@/services/useFetch';
 import { fetchMovieDetails, fetchMovieImages, fetchMovieVideos, pickMainTrailer } from '@/services/api';
@@ -29,10 +29,46 @@ import { onEnrichmentChanged } from '@/services/enrichment';
 import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, { Path, Line } from 'react-native-svg';
 
-import { TICKET_GLASS_TINT, TICKET_ACCENT, ink, accent } from '@/components/moviedetails/ticketTheme';
+import { TICKET_GLASS_TINT, ink, accent } from '@/components/moviedetails/ticketTheme';
 import { NAV_BOTTOM, NAV_SIDE_INSET } from '@/constants/navMetrics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useMovieSheet, SHEET_TOP_GAP, SHEET_RADIUS } from '@/contexts/MovieSheetContext';
+import {
+  useMovieSheet,
+  SheetLineageProvider,
+  type SheetBeneath,
+  SHEET_TOP_GAP,
+  SHEET_RADIUS,
+  RECEDE_SCALE,
+  RECEDE_RADIUS,
+  RECEDE_BLUR,
+  FROST_STOPS,
+  FROST_RESPONSE,
+  ESCAPE_MIN_SHEETS,
+  ESCAPE_HOLD_MS,
+  ESCAPE_BREAK_MS,
+  ESCAPE_TRAVEL,
+  ESCAPE_OVERPULL,
+  ESCAPE_SWELL,
+  ESCAPE_PULSE_LADDER,
+  ESCAPE_PULSE_MIN_GAP,
+  ESCAPE_PULSE_REF_MS,
+  ESCAPE_PULSE_TICK,
+  escapePulseAt,
+  ESCAPE_TRACK_W,
+  ESCAPE_TRACK_LEAD,
+  ESCAPE_TRACK_H,
+  ESCAPE_UV_UNIFY,
+  ESCAPE_COMMIT_P,
+  ESCAPE_SEAT_SPRING,
+  ESCAPE_STEP_MS,
+} from '@/contexts/MovieSheetContext';
+import { EntityOverlayHost, EntityOverlayProvider, useEntityOverlay } from '@/contexts/EntityOverlayContext';
+import type { EntityPage } from '@/services/entities';
+
+// The frost a stacked sheet pulls over this route's content — same construction
+// as the tabs' recede stage (an UNSCALED sibling; glass under a scaled ancestor
+// stops sampling).
+const AnimatedBlurView = ReAnimated.createAnimatedComponent(BlurView);
 
 // Add new memoized components to prevent unnecessary re-renders
 const MemoizedMovieTabBar = React.memo(MovieTabBar);
@@ -177,6 +213,17 @@ interface MovieDetailsViewProps {
   // 1 while cinema mode or the artwork viewer owns the screen: the sheet must not
   // be draggable out from under a playing trailer or an expanded artwork.
   dragLockSV: SharedValue<number>;
+  // 1 while the escape hold owns the touch (the field is out below the
+  // chevron) — written by the control below, read by the sheet pan's guards.
+  escapeHoldSV: SharedValue<number>;
+  // The instrument's clocks — owned by the ROUTE (the field renders in a
+  // route-level overlay, above the card the scrub slides away); the control
+  // in the top bar writes them through this bundle.
+  escapeClocks: {
+    holdP: SharedValue<number>;
+    knotTy: SharedValue<number>;
+    armedP: SharedValue<number>;
+  };
   // True while a drag is displacing the sheet: the inner scroll is disabled so a
   // reversing finger moves the SHEET back up rather than scrolling the content
   // under it. Re-enabled on release (mid-gesture re-enable needs scrollTo, which
@@ -202,6 +249,279 @@ type HeroArtwork = {
   logo: string | null;     // title logo laid over the hero
 };
 
+// ── THE ESCAPE HOLD — the chevron and its track ─────────────────────────────
+//
+// Deep-stack clear-all (Bryan, 2026-08-12). Hold the close control from two
+// stacked sheets and a track appears beneath it — a subtle grey pill whose
+// LENGTH is the readout, printed before the finger moves. The chevron itself
+// slides down it, gaining weight as it goes, and floods with the one violet
+// at the foot. Release there and the whole tower cascades home; release
+// anywhere short and the chevron rides back to its seat with nothing changed.
+//
+// ▸ ONE GESTURE, NOT A BUTTON WITH EXTRAS. A Pan with activateAfterLongPress
+//   is the hold AND the pull, so the finger never has to be re-recognised at
+//   the moment the drag begins. The Tap runs EXCLUSIVE with it: released
+//   before the hold matures → tap → onBack; matured → the pan owns the touch
+//   and the tap is cancelled, so letting go of a travelled chevron never also
+//   dismisses a layer. A finger that MOVES before maturing fails both, and the
+//   touch falls through to the sheet's own drag-to-dismiss — dragging from the
+//   chevron still works like anywhere else on the card.
+//
+// ▸ THE SHEET PAN IS LOCKED WHILE HELD (escapeHoldSV): a downward pull from a
+//   held chevron belongs to the escape, not to drag-to-dismiss throwing away
+//   one layer. Same lock grammar as dragLockSV / pageLockSV; its own value
+//   because each of those already has its own absolute writer.
+//
+// ▸ ARMED ONLY AT DEPTH (ESCAPE_MIN_SHEETS): below two stacked sheets the
+//   hold is disabled outright — the chevron is just a chevron, and this
+//   control is byte-identical to what shipped before the escape existed.
+
+function EscapeControl({
+  nested,
+  onBack,
+  escapeHoldSV,
+  clocks,
+}: {
+  nested: boolean;
+  onBack: () => void;
+  escapeHoldSV: SharedValue<number>;
+  clocks: {
+    holdP: SharedValue<number>;
+    knotTy: SharedValue<number>;
+    armedP: SharedValue<number>;
+  };
+}) {
+  const { sheetCount, escape, escaping, escapeCascade } = useMovieSheet();
+  // The instrument's clocks are route-owned (the field draws in a route-level
+  // overlay above the card); this control is the gesture that winds them.
+  // knotTy is the finger: raw translation to ESCAPE_TRAVEL, then rubber past
+  // it (a third of the extra, capped) — stretchy, never floppy.
+  const { holdP, knotTy, armedP } = clocks;
+  // THE SNAP's state: wasArmed edge-detects the heavy haptic; committed parks
+  // the whole control once a drop is under way — from that frame the provider
+  // owns the exit and nothing here may reset the clocks.
+  const wasArmed = useSharedValue(0);
+  const committed = useSharedValue(0);
+
+  // A gesture's enabled flag is a JS prop, so the depth test lives in React
+  // state mirrored off the provider's count. Flips only on sheet mount/unmount.
+  const [armed, setArmed] = useState(false);
+  useAnimatedReaction(
+    () => sheetCount.value >= ESCAPE_MIN_SHEETS,
+    (deep, prev) => {
+      if (deep !== prev) runOnJS(setArmed)(deep);
+    },
+    [sheetCount]
+  );
+
+  // ── THE CRESCENDO ──────────────────────────────────────────────────────────
+  // Three voices, and the order is the whole point. The hold LATCHES with a
+  // medium thump — you are in. The pull then RAMPS: a pulse that gets heavier
+  // and faster the deeper you go (see ESCAPE_PULSE_*). The foot lands a
+  // doubled heavy — the confirmation that letting go now drops the tower.
+  const breakTick = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  }, []);
+  // ▸ THE PULSE — the ramp itself, paced by a timer rather than by the finger.
+  // It re-reads the pull each beat and asks the ramp tables what to do at that
+  // depth: how hard to hit, and how long to wait before the next one. So the
+  // tempo tracks depth continuously instead of stepping at fixed distances,
+  // and the SHAPE of the whole build lives in three editable tables rather
+  // than in this function — see the tuning block in MovieSheetContext.
+  const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stopPulse = useCallback(() => {
+    if (pulseTimer.current) {
+      clearTimeout(pulseTimer.current);
+      pulseTimer.current = null;
+    }
+  }, []);
+  const pulseAt = useRef({ ms: 0, depth: 0 });
+  const pulse = useCallback(() => {
+    const p = Math.min(1, Math.max(0, escape.value));
+    const step = escapePulseAt(p);
+    // Silent near the seat and through the hush — but the player keeps
+    // ticking, so the ramp resumes the instant the pull re-enters it (a thumb
+    // that retreats from the foot picks the build back up where it left off).
+    if (step) {
+      const last = pulseAt.current;
+      const now = Date.now();
+      const sinceMs = now - last.ms;
+      // TIME or DEPTH, whichever comes first, never closer than the floor.
+      // The depth trigger is what survives a fast swipe: the thumb may only be
+      // at this depth for a few milliseconds, but the beat belonging to it
+      // still plays.
+      if (
+        sinceMs >= ESCAPE_PULSE_MIN_GAP &&
+        (sinceMs >= step.period || p - last.depth >= step.period / ESCAPE_PULSE_REF_MS)
+      ) {
+        const ladder = ESCAPE_PULSE_LADDER;
+        const rung = Math.min(
+          ladder.length - 1,
+          Math.max(0, Math.floor(step.weight * ladder.length))
+        );
+        Haptics.impactAsync(ladder[rung] as Haptics.ImpactFeedbackStyle);
+        last.ms = now;
+        last.depth = p;
+      }
+    }
+    pulseTimer.current = setTimeout(pulse, ESCAPE_PULSE_TICK);
+  }, [escape]);
+  const startPulse = useCallback(() => {
+    stopPulse();
+    // A fresh hold owes no recovery time — the first beat lands the moment the
+    // pull clears the table's opening stop.
+    pulseAt.current = { ms: 0, depth: 0 };
+    pulse();
+  }, [pulse, stopPulse]);
+  // A hold torn down mid-pull (route unmounted by the cascade, a dev reload)
+  // must not leave a timer thumping into an empty screen.
+  useEffect(() => stopPulse, [stopPulse]);
+  // THE CONFIRMATION — deliberately not just one more impact. Two heavies a
+  // beat apart land as a single weighty THUD rather than another tick, so the
+  // foot is unmistakably a different event from the ratchet that led to it.
+  const armTick = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    setTimeout(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy), 55);
+  }, []);
+
+  const hold = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(armed)
+        .maxPointers(1)
+        .hitSlop(10)
+        .activateAfterLongPress(ESCAPE_HOLD_MS)
+        .onStart(() => {
+          // A drop mid-pop or another live scrub owns every clock — a fresh
+          // hold must not start writing the escape value under them.
+          if (escaping.value === 1) return;
+          escapeHoldSV.value = 1;
+          holdP.value = withTiming(1, { duration: ESCAPE_BREAK_MS });
+          runOnJS(breakTick)();
+          runOnJS(startPulse)();
+        })
+        .onUpdate((e) => {
+          if (escapeHoldSV.value === 0) return;
+          // THE PULL, and a little give at each end. The escape clock is the
+          // CLAMPED travel — stretching can never reach the commit line — while
+          // the chevron (and the track under it) take a quarter of the extra
+          // finger, capped at ESCAPE_OVERPULL. Barely there by design: enough
+          // that the ends feel like material rather than a wall.
+          const raw = e.translationY;
+          const ty = Math.min(ESCAPE_TRAVEL, Math.max(0, raw));
+          escape.value = ty / ESCAPE_TRAVEL;
+          knotTy.value =
+            raw > ESCAPE_TRAVEL
+              ? ESCAPE_TRAVEL + Math.min(ESCAPE_OVERPULL, (raw - ESCAPE_TRAVEL) / 4)
+              : raw < 0
+                ? Math.max(-ESCAPE_OVERPULL, raw / 4)
+                : raw;
+          // THE FOOT, edge-detected with hysteresis: arm at the very bottom
+          // (the heavy thump, the chevron floods violet), and disarm only if
+          // the finger retreats past the commit line — no flutter under a
+          // resting thumb.
+          if (escape.value >= 0.995 && wasArmed.value === 0) {
+            wasArmed.value = 1;
+            armedP.value = withTiming(1, { duration: 140 });
+            runOnJS(armTick)();
+          } else if (escape.value < ESCAPE_COMMIT_P && wasArmed.value === 1) {
+            wasArmed.value = 0;
+            armedP.value = withTiming(0, { duration: 140 });
+          }
+        })
+        .onEnd(() => {
+          if (escapeHoldSV.value === 0) return;
+          // ONE OUTCOME, and only at the foot: THE DROP. The field pours home
+          // while the provider replays the journey in reverse — see the
+          // cascade note in MovieSheetContext. `escape` deliberately stays at
+          // 1 through the run so the column holds its unified violet until the
+          // last layer is gone; the provider brings it home.
+          if (escape.value >= ESCAPE_COMMIT_P) {
+            committed.value = 1;
+            holdP.value = withTiming(0, { duration: 240 });
+            runOnJS(stopPulse)();
+            runOnJS(escapeCascade)();
+          }
+        })
+        .onFinalize(() => {
+          if (committed.value === 1) return;
+          // Anything short of the foot never happened: the lens rides the seat
+          // spring home and the field pours back into the seat. Nothing in the
+          // stack ever moved, so there is nothing to put back.
+          escapeHoldSV.value = 0;
+          runOnJS(stopPulse)();
+          wasArmed.value = 0;
+          armedP.value = withTiming(0, { duration: 140 });
+          holdP.value = withTiming(0, { duration: ESCAPE_BREAK_MS });
+          knotTy.value = withSpring(0, ESCAPE_SEAT_SPRING);
+          escape.value = withSpring(0, ESCAPE_SEAT_SPRING);
+        }),
+    [armed, escapeHoldSV, holdP, knotTy, escape, escaping, armedP, wasArmed, committed, breakTick, armTick, startPulse, stopPulse, escapeCascade]
+  );
+
+  const tap = useMemo(
+    () =>
+      Gesture.Tap()
+        .hitSlop(10)
+        .onEnd((_e, success) => {
+          if (success) runOnJS(onBack)();
+        }),
+    [onBack]
+  );
+
+  const composed = useMemo(() => Gesture.Exclusive(hold, tap), [hold, tap]);
+
+  // ONE CHEVRON ON SCREEN DURING A SCRUB (Bryan, 2026-08-12, off his
+  // screenshot): the sheets sliding past underneath were each still wearing
+  // their own resting chevron, so the unwind ran under a little column of
+  // redundant glyphs. Every control on the stack stands down for the duration
+  // — the held one via holdP (it has become the puck), the rest via this —
+  // and they fade back in together when the scrub ends, on the break clock so
+  // they arrive with the field rather than snapping on.
+  const standDown = useSharedValue(0);
+  useAnimatedReaction(
+    () => escaping.value,
+    (live, prev) => {
+      if (live === prev) return;
+      standDown.value = withTiming(live, { duration: ESCAPE_BREAK_MS });
+    },
+    []
+  );
+  // At rest this chevron IS the control; on hold it hands off to the route
+  // overlay's puck — same pixel, opposite opacity ramps — so the glyph the
+  // finger rides is the one that can leave the card.
+  const chevronStyle = useAnimatedStyle(() => ({
+    opacity: (1 - holdP.value) * (1 - standDown.value),
+  }));
+
+  return (
+    <GestureDetector gesture={composed}>
+      <View
+        style={styles.closeBtn}
+        accessible
+        accessibilityRole="button"
+        accessibilityLabel={nested ? 'Back' : 'Close'}
+        // RNGH taps don't reliably hear VoiceOver's synthesized touch — the
+        // explicit action keeps the control operable with a screen reader.
+        accessibilityActions={[{ name: 'activate' }]}
+        onAccessibilityAction={(e) => {
+          if (e.nativeEvent.actionName === 'activate') onBack();
+        }}
+      >
+        <ReAnimated.View style={chevronStyle}>
+          {/* Nested detail slid in from the right → back chevron; root sheet → down. */}
+          <Ionicons
+            name={nested ? 'chevron-back' : 'chevron-down'}
+            size={26}
+            color="#fff"
+            style={styles.closeChevron}
+          />
+        </ReAnimated.View>
+      </View>
+    </GestureDetector>
+  );
+}
+
 const MovieDetailsView = ({
   movieId,
   nested,
@@ -214,6 +534,8 @@ const MovieDetailsView = ({
   sheetPan,
   sheetScrollY,
   dragLockSV,
+  escapeHoldSV,
+  escapeClocks,
   scrollLocked,
 }: MovieDetailsViewProps) => {
   const [artwork, setArtwork] = useState<HeroArtwork | null>(null);
@@ -1186,16 +1508,14 @@ const MovieDetailsView = ({
         // would otherwise keep swallowing taps meant for the viewer beneath it.
         pointerEvents={cinema || expandedArtwork ? 'none' : 'box-none'}
       >
-        <Pressable
-          onPress={onBack}
-          hitSlop={10}
-          style={styles.closeBtn}
-          accessibilityRole="button"
-          accessibilityLabel={nested ? 'Back' : 'Close'}
-        >
-          {/* Nested detail slid in from the right → back chevron; root sheet → down. */}
-          <Ionicons name={nested ? 'chevron-back' : 'chevron-down'} size={26} color="#fff" style={styles.closeChevron} />
-        </Pressable>
+        {/* Close (one step) — and, from two stacked sheets, the ESCAPE HOLD:
+            rest a finger on it and the field pours out beneath the chevron. */}
+        <EscapeControl
+          nested={nested}
+          onBack={onBack}
+          escapeHoldSV={escapeHoldSV}
+          clocks={escapeClocks}
+        />
 
         {/* The star (Paper's notch model) replaces the INFO/ENTRIES toggle: a hollow
             cutout until this film has an entry, enrichment prints dots around it,
@@ -1544,6 +1864,33 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 6,
   },
+  // One particle of the swarm. Size/position land inline per dot (each has its
+  // own radius and seat); colour is ANIMATED — white like the glyph it broke
+  // from, tinting toward its Ultraviolet tier as the pull deepens.
+  // Centres the lens inside its absolute-fill wrapper — the outer box's own
+  // centering doesn't reach through position: absolute.
+  escapeCenter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // THE TRACK's body — a subtle grey pill, seated so the chevron's rest
+  // position is the centre of its top cap: the overlay's own centre is
+  // (20, 20), and the cap radius is LEAD.
+  escapeTrack: {
+    position: 'absolute',
+    left: 20 - ESCAPE_TRACK_LEAD,
+    top: 20 - ESCAPE_TRACK_LEAD,
+    width: ESCAPE_TRACK_W,
+    height: ESCAPE_TRACK_H,
+    borderRadius: ESCAPE_TRACK_LEAD,
+    overflow: 'hidden',
+    // Stretches about its top cap, so the seat stays put and only the far end
+    // gives — see trackStyle.
+    transformOrigin: 'top',
+    backgroundColor: 'rgba(146,142,136,0.16)',
+    borderWidth: 0.5,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
   // Semi-collapsed synopsis, just under the hero logo. Horizontal inset matches the meta
   // row + the details card (MovieTabBar) below — everything aligns to a single 20px column.
   // Synopsis — centered, matching the ticket's centered voice (footer title,
@@ -1590,6 +1937,9 @@ const NAV_SLIDE_MS = 280;
 //    accelerates away like a thing released rather than a thing pushed.
 const SHEET_IN_SPRING = { damping: 30, stiffness: 280, mass: 1 };
 const SHEET_OUT_TIMING = { duration: 300, easing: Easing.in(Easing.cubic) };
+// One step of the escape cascade: quicker than a lone dismissal (there may be
+// several in a row) but the same accelerate-away shape.
+const ESCAPE_STEP_TIMING = { duration: ESCAPE_STEP_MS, easing: Easing.in(Easing.cubic) };
 
 // ── The drag grammar (increment 2) ──────────────────────────────────────────
 // Pull down at the TOP of the sheet's content and the sheet follows the finger
@@ -1616,20 +1966,63 @@ const RELEASE_MIN_V = 900; //   px/s floor when turning release speed into time
  */
 const MovieDetailsScreen = () => {
   // `trailer=1` = a hero-section TRAILER button opened this sheet — auto-run the
-  // trailer flow on the root layer once the ticket lands.
-  const { id, trailer } = useLocalSearchParams();
+  // trailer flow on the root layer once the ticket lands. `fromKind`/`fromId` =
+  // the entity page that pushed this sheet stamped its identity on it (see
+  // EntityScreen's openFilm) — the loop guard's one input.
+  const { id, trailer, fromKind, fromId } = useLocalSearchParams();
+  // WHO THIS SHEET IS SITTING ON — one answer, two readers. The cast tab's loop
+  // guard consults it through SheetLineageProvider ("am I about to open the
+  // person I am already standing on?"), and the escape's registration reads
+  // whether it is null at all, which on the BASE sheet is what says the chain
+  // began on the ground's own page. Declared up here so neither reader has to
+  // re-derive it — two copies of this predicate is exactly how they drift.
+  const beneath = useMemo<SheetBeneath>(
+    () =>
+      typeof fromKind === 'string' && typeof fromId === 'string' && Number(fromId) > 0
+        ? { kind: fromKind as EntityPage['kind'], id: Number(fromId) }
+        : null,
+    [fromKind, fromId]
+  );
   const router = useRouter();
   const [movieStack, setMovieStack] = useState<string[]>([String(id)]);
 
-  // ── THE SHEET PRESENTATION (increment 1 of the card-stack look) ─────────────
-  // The route is a TRANSPARENT modal now — the OS mounts it with no animation and
+  // ── THE SHEET PRESENTATION ──────────────────────────────────────────────────
+  // The route is a TRANSPARENT modal — the OS mounts it with no animation and
   // this component draws the whole presentation: a rounded card that slides up
-  // from below while the screen underneath (still live behind us) recedes. Both
-  // movements are pure functions of ONE shared value, `progress`, owned by
-  // MovieSheetContext — the recede stage in (tabs) reads the same value, so the
-  // sheet and the background cannot disagree on any frame.
+  // from below while the screen underneath (still live behind us) recedes. The
+  // card's slide and the recede are pure functions of shared values owned by
+  // MovieSheetContext, so the layers cannot disagree on any frame.
+  //
+  // ▸ STACKING (enhance/cast): sheets sit on top of each other — a cast member's
+  // page pushes a film's sheet while this one is still seated below. This
+  // sheet's `slide` IS the cover clock of the layer beneath it: the tabs'
+  // recede (`progress`) for the base sheet, the lower ROUTE's cover clock for
+  // an upper one — so rising, dragging and dismissing recede+frost whatever
+  // this card moves over, at any depth, finger-tracked, by construction.
+  // Adopted ONCE at first render and frozen: every worklet below closes over
+  // `slide`, so its identity must never change.
   const insets = useSafeAreaInsets();
-  const { progress } = useMovieSheet();
+  const { peekCoverClock, registerSheet, escape, escaping } = useMovieSheet();
+  const slideRef = useRef<SharedValue<number> | null>(null);
+  if (slideRef.current === null) slideRef.current = peekCoverClock();
+  const slide = slideRef.current;
+  // And this route's OWN cover clock — the value a sheet stacked above this one
+  // drives, and the covered stage below reads.
+  const coverSV = useSharedValue(0);
+  // 1 while THIS route's escape hold owns a touch. Declared here — above every
+  // worklet that reads it (capture order, see the safety note in the tabs
+  // layout) — written by the control in the top bar, read by the sheet pan's
+  // guards.
+  const escapeHoldSV = useSharedValue(0);
+  // The escape instrument's clocks live at the ROUTE so the field can render
+  // in an overlay above everything this route draws — the card is the FIRST
+  // layer a scrub slides away, and an instrument inside it would ride off
+  // (and be clipped) with it. The control in the top bar still owns the
+  // gesture; these are the wires between it and the overlay.
+  const holdP = useSharedValue(0);
+  const knotTy = useSharedValue(0);
+  const armedP = useSharedValue(0);
+  const escapeClocks = useMemo(() => ({ holdP, knotTy, armedP }), [holdP, knotTy, armedP]);
   const screenH = Dimensions.get('window').height;
   // The card's top edge: below the status bar, leaving SHEET_TOP_GAP of the
   // receded screen in view — the sliver that says "your place is kept".
@@ -1637,24 +2030,117 @@ const MovieDetailsScreen = () => {
   const travel = screenH - sheetTop;
 
   useEffect(() => {
-    progress.value = withSpring(1, SHEET_IN_SPRING);
+    // Registered through a ref so the registry's copy never goes stale — the
+    // effect is one-shot, the layer's answers re-form per render.
+    // The third argument is the lineage stamp — see registerSheet. Only the
+    // BASE sheet's answer is used, and there it says whether this chain started
+    // on an entity page the ground is still holding up.
+    const unregister = registerSheet(coverSV, () => stepOutRef.current(), beneath != null);
+    slide.value = withSpring(1, SHEET_IN_SPRING);
     return () => {
+      unregister();
       // Safety net for any unmount that skipped the animated dismissal (a
-      // deep-link replace, a dev reload): never leave the card behind receded.
-      progress.value = 0;
+      // deep-link replace, a dev reload): never leave the layer behind receded.
+      slide.value = 0;
     };
     // One-shot on mount by design.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const sheetSlideStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: (1 - progress.value) * travel }],
+    transform: [{ translateY: (1 - slide.value) * travel }],
   }));
+
+  // ── THE COVERED STAGE — this route receding under a sheet stacked above it ──
+  // The tabs' recede grammar, applied to this route's own content (the sheet
+  // card AND any person page hosted over it): scale about the top, drop to the
+  // status bar's foot, corners round, a frost thickens on the shared response
+  // curve. All pure functions of `coverSV`, which IS the upper sheet's slide —
+  // so a slow drag up there hands focus back here frame by frame.
+  //
+  // Same scars honored as RecedeStage: at rest the worklet returns an EMPTY
+  // transform (glass inside the card stops sampling under a scaled ancestor —
+  // even a resting scale of 1), the frost is an UNSCALED sibling above, and the
+  // stage rasterizes only while covered so scaled text stays clean.
+  const coveredDrop = insets.top;
+  const coveredStyle = useAnimatedStyle(() => {
+    // The escape needs nothing composed here: a scrub unwinds the stack by
+    // driving each sheet's own slide, and this layer's un-recede is this same
+    // pure function responding to the sheet above it sliding away.
+    const p = coverSV.value;
+    if (p === 0) {
+      return { borderRadius: 0, transform: [] };
+    }
+    return {
+      borderRadius: interpolate(p, [0, 0.3], [0, RECEDE_RADIUS], Extrapolation.CLAMP),
+      transform: [{ translateY: p * coveredDrop }, { scale: 1 - p * (1 - RECEDE_SCALE) }],
+    };
+  });
+  // ── THE PARK (deep-stack performance, Bryan 2026-08-12) ────────────────────
+  // A covered route at rest is 100% OCCLUDED: its receded card parks below the
+  // top edge of the seated sheet above it, so not one of its pixels reaches
+  // the screen — yet it was still paying full price every frame, most
+  // expensively its LIVE full-screen frost (a real-time blur pass each). At
+  // depth five that is four simultaneous full-screen blur passes for nothing,
+  // which is exactly the deep-stack jitter. So a fully covered route goes
+  // dark — opacity 0 and frost intensity 0.
+  //
+  // ▸ THE GATE IS `coverSV` ALONE, and that is the whole trick. This route's
+  // cover clock IS the slide of the sheet on top of it, so "still exactly 1"
+  // means the layer above has not moved a pixel — nothing of this route can
+  // be on screen yet, whatever else is happening. So it stays dark through the
+  // whole pull and wakes only as the cascade actually reaches it: the unwind
+  // runs with about two live layers instead of all N, at exactly the moment
+  // frames are scarcest. (An earlier version also unparked on a global escape
+  // flag — defensive, and precisely wrong: it lit the entire tower the instant
+  // a hold matured.)
+  //
+  // The wake is a UI-thread style write, so it lands the same frame the
+  // covering layer starts to move — no React commit in the loop, nothing to
+  // be late. Threshold mirrors the 0.001 wake threshold below; no new
+  // numbers.
+  const parkStyle = useAnimatedStyle(() => ({
+    opacity: coverSV.value >= 0.999 ? 0 : 1,
+  }));
+  const coverFrostProps = useAnimatedProps(() => ({
+    // The frost dies with the park — an alpha-culled ancestor should already
+    // skip the blur pass, but a live effect view is the one thing expensive
+    // enough to be worth killing twice.
+    intensity:
+      coverSV.value >= 0.999
+        ? 0
+        : RECEDE_BLUR * interpolate(coverSV.value, FROST_STOPS, FROST_RESPONSE, 'clamp'),
+  }));
+  const [coveredUp, setCoveredUp] = useState(false);
+  useAnimatedReaction(
+    () => coverSV.value > 0.001,
+    (up, prev) => {
+      if (prev === null || up !== prev) runOnJS(setCoveredUp)(up);
+    },
+    []
+  );
 
   // ── Drag-to-dismiss state (all UI-thread; the pan reads/writes these) ──────
   const sheetScrollY = useSharedValue(0); // current level's scroll offset (the gate)
   const dragLockSV = useSharedValue(0); //   1 while cinema / artwork own the screen
   const dismissingSV = useSharedValue(0); // 1 once an exit is committed — pan goes inert
+
+  // ── The sheet-scoped entity overlay (enhance/cast increment 2) ─────────────
+  // Cast faces open FULL-SCREEN person pages, hosted INSIDE this route (the
+  // route is a full-screen transparent layer, so the page genuinely takes the
+  // screen). This provider instance shadows the root one for the route's
+  // subtree only — the nav pill, outside, never sees it, which is the accepted
+  // no-FILTER-pose gap. While a page is up the sheet's pan must go inert: you
+  // cannot drag Spider-Man out from under Tom Holland. Separate value from
+  // dragLockSV on purpose — that one is WRITTEN by the details view (cinema /
+  // artwork) and two absolute writers on one flag would fight.
+  const { isOpen: entityOpen, requestFold } = useEntityOverlay();
+  const pageLockSV = useSharedValue(0);
+  useEffect(() => {
+    pageLockSV.value = entityOpen ? 1 : 0;
+  }, [entityOpen, pageLockSV]);
+  const entityOpenRef = useRef(entityOpen);
+  entityOpenRef.current = entityOpen;
   const engaged = useSharedValue(0); //      1 while a finger is driving the sheet
   const engageTy = useSharedValue(0); //     pan translationY at the engage frame
   const engageP = useSharedValue(1); //      progress at the engage frame
@@ -1715,6 +2201,7 @@ const MovieDetailsScreen = () => {
   }, []);
 
   const pushMovie = React.useCallback((movieId: number) => {
+    if (escaping.value === 1) return; // no new layers mid-escape
     hasNavigated.current = true;
     navDir.value = 1;
     // A new movie always opens on Details — remembering a tab is about returning to a
@@ -1724,6 +2211,7 @@ const MovieDetailsScreen = () => {
   }, [navDir]);
 
   const popMovie = React.useCallback(() => {
+    if (escaping.value === 1) return; // the escape owns every pop
     navDir.value = -1;
     setMovieStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
     // Drop the level being left so a later visit to the same movie starts on Details
@@ -1748,10 +2236,13 @@ const MovieDetailsScreen = () => {
     dismissingSV.value = 0;
   }, [dismissingSV]);
   const dismissSheet = React.useCallback(() => {
+    // The scrub/drop is the only navigator while it runs — a chevron tap
+    // racing it would double-pop and take an extra layer with it.
+    if (escaping.value === 1) return;
     if (dismissing.current) return;
     dismissing.current = true;
     dismissingSV.value = 1; // the pan must not catch a sheet the chevron sent home
-    progress.value = withTiming(0, SHEET_OUT_TIMING, (finished) => {
+    slide.value = withTiming(0, SHEET_OUT_TIMING, (finished) => {
       if (finished) {
         runOnJS(finishDismiss)();
       } else {
@@ -1760,7 +2251,89 @@ const MovieDetailsScreen = () => {
         runOnJS(resetDismissing)();
       }
     });
-  }, [progress, dismissingSV, finishDismiss, resetDismissing]);
+  }, [slide, dismissingSV, finishDismiss, resetDismissing]);
+
+  // ── THE CASCADE STEP — this route's own exit, played on demand. ───────────
+  // A committed escape unwinds the stack top-down, each layer leaving in its
+  // OWN language (Bryan, 2026-08-12: "the movements happen in reverse
+  // order"). The provider calls each sheet's step in turn: fold my person page
+  // home if one is up — its existing fold, on its own clock, the same motion a
+  // tap-back would run — then slide my card down, which un-recedes the layer
+  // beneath for free because my slide IS its cover clock, and finally pop
+  // myself. The resolving promise is what lets the next layer begin.
+  const foldWaiter = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!entityOpen && foldWaiter.current) {
+      foldWaiter.current();
+      foldWaiter.current = null;
+    }
+  }, [entityOpen]);
+  // A route popped by anything else (hardware back racing the cascade) must
+  // make its queued step a no-op rather than animate a card that has gone.
+  const stepAliveRef = useRef(true);
+  useEffect(() => () => {
+    stepAliveRef.current = false;
+  }, []);
+  const stepOut = React.useCallback(async () => {
+    if (!stepAliveRef.current || dismissing.current) return;
+    dismissing.current = true;
+    dismissingSV.value = 1;
+    if (entityOpenRef.current) {
+      await new Promise<void>((resolve) => {
+        foldWaiter.current = resolve;
+        requestFold();
+      });
+    }
+    await new Promise<void>((resolve) => {
+      slide.value = withTiming(0, ESCAPE_STEP_TIMING, () => {
+        runOnJS(resolve)();
+      });
+    });
+    router.back();
+  }, [slide, dismissingSV, requestFold, router]);
+  const stepOutRef = useRef(stepOut);
+  stepOutRef.current = stepOut;
+
+  // THE TRAVELLING CHEVRON — the same glyph the control hides, now on the
+  // track: it appears exactly as the control's own chevron fades (same pixel,
+  // opposite ramps), rides the finger, and gains weight as it nears the drop.
+  const puckStyle = useAnimatedStyle(() => ({
+    opacity: holdP.value,
+    transform: [{ translateY: knotTy.value }, { scale: 1 + ESCAPE_SWELL * escape.value }],
+  }));
+  // Armed at the foot, the glyph floods with the one violet.
+  const puckTintStyle = useAnimatedStyle(() => ({ opacity: armedP.value }));
+  // THE TRACK — the chevron's path. It appears with the hold, and its LENGTH
+  // is the whole readout: this far, and you are out.
+  //
+  // It also takes the give at the ends, and THE END THAT GIVES IS THE ONE THE
+  // THUMB IS PUSHING AGAINST (his correction: going back up "should not
+  // stretch the bottom, it should stretch the edge of the pill the user goes
+  // to"). Pull past the foot and the bottom edge follows you down; push above
+  // the seat and the TOP edge follows you up, with the foot staying exactly
+  // where it was. The first build scaled about the top for both, which meant
+  // an upward push shortened the far end — the track shrinking away from the
+  // thumb instead of stretching toward it.
+  //
+  // Both cases fall out of one pair of terms. About the top origin, a point at
+  // depth d lands at d·scale − up: the top (d = 0) moves up by `up`, and the
+  // bottom (d = H) lands at H + down. Each edge answers only to the overshoot
+  // on its own side, and the chevron's overshoot is the same number, so the
+  // glyph stays exactly one cap-radius inside whichever end it is leaning on.
+  const trackStyle = useAnimatedStyle(() => {
+    const over = knotTy.value - Math.min(ESCAPE_TRAVEL, Math.max(0, knotTy.value));
+    const up = Math.max(0, -over);
+    const down = Math.max(0, over);
+    return {
+      opacity: holdP.value * 0.9,
+      transform: [
+        { translateY: -up },
+        { scaleY: (ESCAPE_TRACK_H + up + down) / ESCAPE_TRACK_H },
+      ],
+    };
+  });
+
+  const lineage = useMemo(() => ({ beneath, dismissSheet }), [beneath, dismissSheet]);
 
   // ── THE PAN — the sheet's drag grammar, one gesture on the whole card. ─────
   //
@@ -1771,9 +2344,10 @@ const MovieDetailsScreen = () => {
   // frame where the content sits at its top AND the finger is moving down — so
   // a long upward-scroll that reaches the top mid-stroke hands its remaining
   // travel straight to the sheet, with the translation at that frame as the
-  // baseline. From engagement on, progress = engageP − drag/travel: the sheet,
-  // the recede, the corners and the dim all track the finger because they are
-  // all already functions of progress.
+  // baseline. From engagement on, slide = engageP − drag/travel. For the BASE
+  // sheet that slide IS the shared recede clock, so the card, the background's
+  // scale, the corners and the frost all track the finger; an upper sheet's
+  // drag moves only its own card — the world beneath is already receded.
   //
   // Release: a downward flick (FLICK_DISMISS_V) or resting past DISMISS_BELOW_P
   // commits the exit at the finger's own speed (never slower than RELEASE_MIN_V,
@@ -1788,26 +2362,26 @@ const MovieDetailsScreen = () => {
         .activeOffsetY(DRAG_ACTIVATE_Y)
         .failOffsetX([-DRAG_FAIL_X, DRAG_FAIL_X])
         .onUpdate((e) => {
-          if (dismissingSV.value === 1 || dragLockSV.value === 1) return;
+          if (dismissingSV.value === 1 || dragLockSV.value === 1 || pageLockSV.value === 1 || escapeHoldSV.value === 1 || escaping.value === 1) return;
           if (engaged.value === 0) {
             if (sheetScrollY.value <= 1 && e.velocityY > 0) {
               engaged.value = 1;
               engageTy.value = e.translationY;
-              engageP.value = progress.value;
+              engageP.value = slide.value;
               runOnJS(setScrollLocked)(true);
             }
             return;
           }
           const drag = e.translationY - engageTy.value;
           const next = engageP.value - drag / travel;
-          progress.value = Math.min(1, Math.max(0, next));
+          slide.value = Math.min(1, Math.max(0, next));
         })
         .onEnd((e) => {
           if (engaged.value === 0) return;
           engaged.value = 0;
           runOnJS(setScrollLocked)(false);
-          if (dismissingSV.value === 1 || dragLockSV.value === 1) return;
-          const p = progress.value;
+          if (dismissingSV.value === 1 || dragLockSV.value === 1 || pageLockSV.value === 1 || escapeHoldSV.value === 1 || escaping.value === 1) return;
+          const p = slide.value;
           const flung = e.velocityY > FLICK_DISMISS_V;
           const past = p < DISMISS_BELOW_P && e.velocityY > -REVERSE_RESCUE_V;
           if (flung || past) {
@@ -1817,7 +2391,7 @@ const MovieDetailsScreen = () => {
             // velocity, floored so a rest-release still leaves decisively.
             const vEff = Math.max(e.velocityY, RELEASE_MIN_V);
             const ms = Math.min(300, Math.max(140, ((p * travel) / vEff) * 1000));
-            progress.value = withTiming(
+            slide.value = withTiming(
               0,
               { duration: ms, easing: Easing.out(Easing.quad) },
               (finished) => {
@@ -1825,9 +2399,9 @@ const MovieDetailsScreen = () => {
               }
             );
           } else {
-            // Home, inheriting the finger's velocity (px/s → progress/s, sign
-            // flipped because up-finger = rising progress).
-            progress.value = withSpring(1, { ...SHEET_IN_SPRING, velocity: -e.velocityY / travel });
+            // Home, inheriting the finger's velocity (px/s → slide/s, sign
+            // flipped because up-finger = rising slide).
+            slide.value = withSpring(1, { ...SHEET_IN_SPRING, velocity: -e.velocityY / travel });
           }
         })
         .onFinalize(() => {
@@ -1836,14 +2410,17 @@ const MovieDetailsScreen = () => {
           if (engaged.value === 1) {
             engaged.value = 0;
             runOnJS(setScrollLocked)(false);
-            if (dismissingSV.value === 0) progress.value = withSpring(1, SHEET_IN_SPRING);
+            if (dismissingSV.value === 0) slide.value = withSpring(1, SHEET_IN_SPRING);
           }
         }),
     [
       travel,
-      progress,
+      slide,
       sheetScrollY,
       dragLockSV,
+      pageLockSV,
+      escapeHoldSV,
+      escaping,
       dismissingSV,
       engaged,
       engageTy,
@@ -1859,13 +2436,26 @@ const MovieDetailsScreen = () => {
 
   return (
     // The stage is TRANSPARENT — the receded card (the screen we came from) shows
-    // through everywhere the sheet isn't.
-    <View style={{ flex: 1 }}>
+    // through everywhere the sheet isn't. The root wears THE PARK (see
+    // parkStyle): fully covered and at rest, this whole route stops rendering —
+    // it is occluded to the last pixel anyway — and wakes on the UI thread the
+    // frame anything starts to move over it.
+    <ReAnimated.View style={[{ flex: 1 }, parkStyle]}>
       {/* The sliver of the old screen above the sheet is DEAD ground, like the
           native card stack's: this swallows those taps so nothing on the receded
           card can be pressed through the gap. */}
       <Pressable style={StyleSheet.absoluteFill} onPress={() => {}} accessible={false} />
 
+      {/* THE COVERED STAGE — everything this route draws (its sheet card AND any
+          person page hosted over it) recedes as one body when a sheet stacks on
+          top; coverSV is that upper sheet's slide. Rasterizes only while
+          covered, for the same text-quality reason the tabs' stage does. */}
+      <SheetLineageProvider value={lineage}>
+      <ReAnimated.View
+        style={[{ flex: 1, transformOrigin: 'top', overflow: 'hidden' }, coveredStyle]}
+        shouldRasterizeIOS={coveredUp}
+        renderToHardwareTextureAndroid={coveredUp}
+      >
       {/* THE SHEET CARD — rounded top corners, clipped, parked below the status
           bar. Its slide and the background's recede read the same shared value;
           the pan on this card is what lets a finger drive that value directly. */}
@@ -1909,13 +2499,101 @@ const MovieDetailsScreen = () => {
             sheetPan={pan}
             sheetScrollY={sheetScrollY}
             dragLockSV={dragLockSV}
+            escapeHoldSV={escapeHoldSV}
+            escapeClocks={escapeClocks}
             scrollLocked={scrollLocked}
           />
         </ReAnimated.View>
       </ReAnimated.View>
       </GestureDetector>
-    </View>
+
+      {/* THE PERSON PAGE LAYER — full screen, above the sheet card (last sibling
+          wins). A cast face's page grows out of its headshot here, browses like
+          any entity page, and its filmography pushes NEW movie routes — upper
+          sheets, made safe by the stacking clock. Renders nothing until a card
+          is tapped. Mid-escape the page rides its TRUE FOLD: this route feeds
+          the exit fraction and the fold lifecycle through these wires, and the
+          page folds home into its cast card across its own unit of the pull. */}
+      <EntityOverlayHost />
+      </ReAnimated.View>
+      </SheetLineageProvider>
+
+      {/* The frost a stacked sheet pulls over this stage — OUTSIDE the scaled
+          wrapper (glass under a scaled ancestor stops sampling), intensity on
+          the shared response curve, thinning live under a dragged finger. */}
+      <AnimatedBlurView
+        tint="default"
+        experimentalBlurMethod="dimezisBlurView"
+        animatedProps={coverFrostProps}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
+
+      {/* THE ESCAPE INSTRUMENT — the track and its chevron, in a route-level
+          overlay pinned to the close control's screen rect (static and known:
+          card top + bar offset — no measurement, none of the Expo Go traps).
+          Deliberately NOT inside the card: the card is the first layer the
+          cascade slides away, and the instrument must stay put while the
+          layers leave beneath it. The travelling chevron appears exactly as
+          the control's own chevron hides — same pixel, opposite ramps.
+
+          MOUNTED ONLY WHILE THIS ROUTE IS THE TOP: the hold is physically
+          reachable nowhere else, so a covered route's instrument would be
+          nothing but style worklets re-evaluating on someone else's pull. */}
+      {!coveredUp && (
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: sheetTop + TOP_BAR_TOP,
+            width: 40,
+            height: 40,
+          }}
+        >
+          {/* THE TRACK — a vertical pill in a very subtle grey behind the
+              chevron's path, faintly glassy. Drawn first, so the glyph rides
+              over it. */}
+          <ReAnimated.View style={[styles.escapeTrack, trackStyle]}>
+            <LinearGradient
+              colors={['rgba(255,255,255,0.10)', 'rgba(255,255,255,0.02)', 'rgba(255,255,255,0.07)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={StyleSheet.absoluteFill}
+              pointerEvents="none"
+            />
+          </ReAnimated.View>
+          <ReAnimated.View
+            pointerEvents="none"
+            style={[StyleSheet.absoluteFill, styles.escapeCenter, puckStyle]}
+          >
+            <Ionicons name="chevron-down" size={26} color="#fff" style={styles.closeChevron} />
+            <ReAnimated.View style={[StyleSheet.absoluteFill, styles.escapeCenter, puckTintStyle]}>
+              <Ionicons
+                name="chevron-down"
+                size={26}
+                color={ESCAPE_UV_UNIFY}
+                style={styles.closeChevron}
+              />
+            </ReAnimated.View>
+          </ReAnimated.View>
+        </View>
+      )}
+    </ReAnimated.View>
   );
 };
 
-export default MovieDetailsScreen;
+/**
+ * The route wraps the stack owner in its OWN EntityOverlayProvider — the cast
+ * drill-down's person pages live inside this route, not in the search screen's
+ * host (which sits buried under the sheet, in another tree). Subtree shadowing
+ * does the scoping: everything in the sheet resolves useEntityOverlay to this
+ * instance; the nav and the search screen keep the root one.
+ */
+export default function MovieSheetRoute() {
+  return (
+    <EntityOverlayProvider>
+      <MovieDetailsScreen />
+    </EntityOverlayProvider>
+  );
+}
