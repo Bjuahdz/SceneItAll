@@ -444,7 +444,6 @@ function TabSlot({
  * satellite. Neither ever hides or shrinks with scroll.
  */
 function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
-  const insets = useSafeAreaInsets();
   const router = useRouter();
   const {
     expanded,
@@ -1637,6 +1636,9 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
 const AnimatedBlurView = Animated.createAnimatedComponent(BlurView);
 
 function RecedeStage({ children }: { children: React.ReactNode }) {
+  // The escape's commit needs nothing from this stage: the cascade pops the
+  // base sheet by animating its slide — which IS `progress` — so the ground's
+  // un-recede on a full unwind is the same pure function as a normal dismiss.
   const { progress } = useMovieSheet();
   const insets = useSafeAreaInsets();
   // Plain number for the worklet: the receded card's top lands where the

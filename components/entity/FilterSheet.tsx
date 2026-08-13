@@ -58,7 +58,6 @@ import {
   type KindKey,
   type SizeBandKey,
   type SortKey,
-  type StatusKey,
 } from "@/hooks/useFilterState";
 import {
   ENTITY_BANDS,
@@ -103,12 +102,6 @@ const DIRECTION_LABELS: Record<SortKey, { desc: string; asc: string }> = {
   // Studios and collections only — the count is films held, so BIGGEST reads more
   // plainly than MOST and does not collide with the rating's HIGHEST.
   size: { desc: "BIGGEST", asc: "SMALLEST" },
-};
-/** Films and entity pages. Shows say AIRED — see `statusLabelsFor`. */
-const STATUS_LABELS: Record<StatusKey, string> = {
-  any: "ANY",
-  released: "RELEASED",
-  upcoming: "UPCOMING",
 };
 // On an ENTITY PAGE, SHOWS is drawn but inert until combined_credits ships — a
 // person's TV work is a separate request and its own project; FILM works today.

@@ -14,7 +14,6 @@ import type { RecentSearch, SearchEntityType } from "./db";
 // RESULTS FILTER below. entities.ts imports nothing from here, so no cycle.
 import { applyFilter, toFilm, type EntityFilm } from "./entities";
 import {
-  isMediaKind,
   SIZE_RANGE,
   type FilterState,
   type KindKey,

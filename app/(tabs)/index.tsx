@@ -108,7 +108,6 @@ const Home = () => {
           data={cloud}
           width={W}
           height={H}
-          selected={selected}
           active={isFocused && ready}
           onSelect={onSelect}
           onVoidPressed={() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)}

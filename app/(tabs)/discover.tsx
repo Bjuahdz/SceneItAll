@@ -43,7 +43,6 @@ import TrendingSection from "@/components/homepage/TrendingSection";
 import UpcomingMoviesSection from "@/components/homepage/UpcomingMoviesSection";
 import BoxOfficeChart from "@/components/homepage/BoxOfficeChart";
 import MinimalMovieSection from "@/components/homepage/MinimalMovieSection";
-import { Movie, TrendingMovie } from "@/interfaces/interfaces";
 
 const ACCENT = "#9ccadf";
 

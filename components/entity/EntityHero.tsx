@@ -195,7 +195,6 @@ const openFadeBand = (kind: EntityPage["kind"]) => {
  * the EXACT same ramp and crop — the overlay and the real hero must be the same
  * picture, pixel for pixel, at the moment the route swaps.
  */
-export const heroOpenGradient = (kind: EntityPage["kind"]) => grad(OPEN_SCRIM[kind]);
 export const HERO_FOCUS_Y = 0.16;
 export const heroContentPosition = (kind: EntityPage["kind"]) =>
   kind === "person" ? ({ top: `${HERO_FOCUS_Y * 100}%`, left: "50%" } as const) : ("center" as const);

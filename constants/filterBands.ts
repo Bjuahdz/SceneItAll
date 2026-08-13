@@ -169,11 +169,7 @@ export const sizeBandsFor = (kind: KindKey): readonly SizeBandKey[] =>
  * FilterSheet.tsx, which is what the `fit` factors are for. Genre is last and takes
  * whatever room is left, clipping its bottom row; that clip IS the scroll affordance
  * for the grid, not a layout bug.
- *
- * These are the shipped values, not the Paper board's — see Row H.
  */
-export const BAND_LABEL_GAP = 12; // label baseline → its control
-export const BAND_GAP = 26; // one band's bottom → the next band's label
 
 /**
  * ▸ WHAT IS CURRENTLY ON, AS A LIST OF WORDS YOU CAN TAKE BACK.
