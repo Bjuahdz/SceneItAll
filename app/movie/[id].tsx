@@ -2396,6 +2396,7 @@ const MovieDetailsScreen = () => {
     closeFilter,
     appliedFilter,
     reading,
+    films,
   } = useEntityOverlay();
   const pageLockSV = useSharedValue(0);
   useEffect(() => {
@@ -2853,7 +2854,17 @@ const MovieDetailsScreen = () => {
           is tapped. Mid-escape the page rides its TRUE FOLD: this route feeds
           the exit fraction and the fold lifecycle through these wires, and the
           page folds home into its cast card across its own unit of the pull. */}
-      <EntityOverlayHost onGrowStart={onPageGrowStart} onFoldStart={onPageFoldStart} />
+      <EntityOverlayHost
+        onGrowStart={onPageGrowStart}
+        onFoldStart={onPageFoldStart}
+        // The interactive back-swipe's cues, mapped onto the same two flips:
+        // the pill leaves on the drag's FIRST frame — with the page the finger
+        // is already shrinking, not at release-commit, which left it collapsing
+        // alone over the verbs island after the page had gone (Bryan,
+        // 2026-08-13) — and blooms back if the swipe cancels.
+        onSwipeBegin={onPageFoldStart}
+        onSwipeCancel={onPageGrowStart}
+      />
 
       {/* ▸ THE FILTER PILL, and the sheet it opens — the one piece of the nav
           that a sheet-borne entity page genuinely needs (Bryan, 2026-08-13).
@@ -2879,7 +2890,14 @@ const MovieDetailsScreen = () => {
           cost for something unreachable. It comes back as the cover clock
           lands, which is the quietest frame available. */}
       <SheetFilterPill
-        visible={pageMoving && !filterCovering && !reading}
+        // `films.length` — no FILTER control over a skeleton (Bryan,
+        // 2026-08-13): the pill blooms when the filmography actually lands,
+        // and a page whose filmography is empty never grows one at all —
+        // there is nothing to filter. THIS PILL ONLY: the nav's pill is the
+        // middle of one bar and gating it left a hole in the pose (his
+        // screenshot — reverted there same day); this one stands alone, so
+        // arriving late reads as intent, not damage.
+        visible={pageMoving && !filterCovering && !reading && films.length > 0}
         filtered={!isDefault(appliedFilter)}
         onPress={openFilter}
       />

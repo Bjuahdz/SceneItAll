@@ -187,6 +187,14 @@ export function EntityOverlayProvider({ children }: { children: React.ReactNode 
     setFilterOpen(false);
     setFilterCovering(false);
     setAppliedFilter(FILTER_DEFAULTS);
+    // Films reset with the filter, and for the same reason — they belong to
+    // the page you were looking at. This matters more than hygiene now: the
+    // SHEET-BORNE filter pill gates its presence on `films.length` (Bryan,
+    // 2026-08-13: no FILTER control over a skeleton — "nothing, at least
+    // visibly, to filter by"; the nav's pill is exempt — see filterPose), so
+    // a stale list from the previous page would open the door early while
+    // the new page is still loading.
+    setFilms([]);
     setReq((cur) => ({ ...r, token: (cur?.token ?? 0) + 1 }));
   }, []);
   const close = useCallback(() => {
@@ -194,6 +202,7 @@ export function EntityOverlayProvider({ children }: { children: React.ReactNode 
     setFilterOpen(false);
     setFilterCovering(false);
     setAppliedFilter(FILTER_DEFAULTS);
+    setFilms([]);
     setReq(null);
   }, []);
 
@@ -270,10 +279,19 @@ export function EntityOverlayProvider({ children }: { children: React.ReactNode 
 export function EntityOverlayHost({
   onClose,
   onFoldStart,
+  onSwipeBegin,
+  onSwipeCancel,
   onGrowStart,
 }: {
   onClose?: () => void;
   onFoldStart?: () => void;
+  /** The interactive back-swipe's own cues — see EntityScreen's contract note.
+   *  Consumed by the SHEET route's filter pill (which must leave with the
+   *  drag's first frame and return on a cancelled swipe); the search screen
+   *  deliberately does not subscribe, keeping onFoldStart's "cancelled swipes
+   *  never reach here" contract intact for the nav. */
+  onSwipeBegin?: () => void;
+  onSwipeCancel?: () => void;
   /** The grow's first motion frame (mount, for pages with no grow). Fires once
    *  per page. The search screen collapses the island off this so the nav's
    *  handover runs WITH the page's entrance and lands with it — the mirror of
@@ -289,6 +307,8 @@ export function EntityOverlayHost({
         req={req}
         onClose={onClose ?? close}
         onFoldStart={onFoldStart}
+        onSwipeBegin={onSwipeBegin}
+        onSwipeCancel={onSwipeCancel}
         onGrowStart={onGrowStart}
         onReadingChange={setReading}
         onFilmsChange={setFilms}
@@ -307,6 +327,8 @@ function OverlayPage({
   req,
   onClose,
   onFoldStart,
+  onSwipeBegin,
+  onSwipeCancel,
   onGrowStart,
   onReadingChange,
   onFilmsChange,
@@ -316,6 +338,8 @@ function OverlayPage({
   req: EntityOverlayRequest;
   onClose: () => void;
   onFoldStart?: () => void;
+  onSwipeBegin?: () => void;
+  onSwipeCancel?: () => void;
   onGrowStart?: () => void;
   onReadingChange?: (reading: boolean) => void;
   onFilmsChange?: (films: EntityFilm[]) => void;
@@ -339,6 +363,8 @@ function OverlayPage({
       remeasureOrigin={req.remeasureOrigin}
       onClose={onClose}
       onFoldStart={onFoldStart}
+      onSwipeBegin={onSwipeBegin}
+      onSwipeCancel={onSwipeCancel}
       onGrowStart={onGrowStart}
       onReadingChange={onReadingChange}
       onFilmsChange={onFilmsChange}

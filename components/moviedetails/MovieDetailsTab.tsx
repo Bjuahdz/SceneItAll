@@ -4,9 +4,12 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import type { MovieDetails } from '../../interfaces/interfaces';
-import type { Person } from '../people/PersonCard';
+import PersonCard, { type Person } from '../people/PersonCard';
 import WatchProvidersSection from './WatchProvidersSection';
 import { useWatchProviders } from '@/hooks/useWatchProviders';
+import { useEntityOverlay } from '@/contexts/EntityOverlayContext';
+import { useSheetLineage } from '@/contexts/MovieSheetContext';
+import { prefetchEntity } from '@/services/entities';
 
 import { TICKET_ACCENT, INK_GREEN, INK_RED } from './ticketTheme';
 
@@ -86,26 +89,54 @@ const StudiosStrip = ({ children }: { children: React.ReactNode }) => {
   );
 };
 
+/** A filmmaker row's data: the shared Person shape plus the RAW TMDB profile
+ *  path — the page's hero seed wants the path, not the sized URL. */
+type Filmmaker = Person & { id: number; profilePath: string | null };
+
 /**
- * Filmmakers as a plain, quiet list — name left, role right. More than three folds
- * into a collapsible with a "Show all" row (no photos, no bios: just who did what).
+ * Filmmakers — B2 · PORTRAIT CHIP (Bryan's ruling, 2026-08-13, Paper board
+ * "build from this"): each row is the shared PersonCard's row variant — a
+ * 42×56 chip ahead of the name, role on the right — and EVERY ROW IS A DOOR,
+ * the same contract as the cast grid: tap → the person's full-screen page,
+ * grown out of the chip when there is a photograph to grow (an initials chip
+ * just opens — the wordmark rule). More than three still folds behind the
+ * "Show all" row.
  */
-const FilmmakersList = ({ people }: { people: Person[] }) => {
+const FilmmakersList = ({ people }: { people: Filmmaker[] }) => {
   const [open, setOpen] = useState(false);
+  const { open: openPage } = useEntityOverlay();
+  // Who this sheet is sitting on — the loop guard's one input (see the cast
+  // tab, whose contract this mirrors verbatim).
+  const lineage = useSheetLineage();
   const visible = open ? people : people.slice(0, FILMMAKERS_PREVIEW);
   const hasMore = people.length > FILMMAKERS_PREVIEW;
 
   return (
     <View>
       {visible.map((p) => (
-        <View key={p.id} style={styles.fmRow}>
-          <Text style={styles.fmName} numberOfLines={1}>
-            {p.name}
-          </Text>
-          <Text style={styles.fmRole} numberOfLines={1}>
-            {p.role}
-          </Text>
-        </View>
+        <PersonCard
+          key={p.id}
+          person={p}
+          variant="row"
+          onPress={(rect, remeasure) => {
+            // ▸ THE LOOP GUARD: tapping the director whose page pushed this
+            // very film folds the sheet back down to their page instead of
+            // stacking a duplicate of where you came from.
+            if (lineage?.beneath?.kind === 'person' && lineage.beneath.id === p.id) {
+              lineage.dismissSheet();
+              return;
+            }
+            // Requests start NOW, so the fetch runs alongside the grow.
+            prefetchEntity('person', p.id);
+            openPage({
+              kind: 'person',
+              id: p.id,
+              seed: p.profilePath ? { imagePath: p.profilePath, name: p.name } : null,
+              origin: p.profilePath ? rect : null,
+              remeasureOrigin: p.profilePath && rect ? remeasure : undefined,
+            });
+          }}
+        />
       ))}
       {hasMore && (
         <Pressable
@@ -163,11 +194,11 @@ const Stat = ({
  * made it. Everything flows to fill the width, so a film with one filmmaker and
  * one studio looks as deliberate as one with six — no fixed strips, no dead space.
  *   1. Snapshot   — date + status, the glanceable stats, genres as a quiet line.
- *   2. Filmmakers — director + writers as vertical portrait cards with quick facts
- *                   (born · age · died); several people page one card at a time.
+ *   2. Filmmakers — director + writers as B2 chip rows (a face ahead of every
+ *                   name), each row a door to the person's page.
  *   3. Watch      — where it streams / rents / buys (JustWatch data via TMDB).
- *   4. Studios    — every production company on full-width logo panels, paged
- *                   one at a time like the filmmakers.
+ *   4. Studios    — every production company's mark, each a door to the
+ *                   studio's page (no grow — the wordmark rule).
  *   5. Box office — budget / revenue / profit, muted, at the foot.
  */
 const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
@@ -185,11 +216,14 @@ const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
     if (!fmMap.has(w.id)) fmMap.set(w.id, { id: w.id, name: w.name, profile_path: w.profile_path, roles: [] });
     fmMap.get(w.id)!.roles.push(w.job);
   });
-  const filmmakers: Person[] = Array.from(fmMap.values()).map((p) => ({
+  const filmmakers: Filmmaker[] = Array.from(fmMap.values()).map((p) => ({
     id: p.id,
     name: p.name,
     role: p.roles.join(' · '),
     imageUrl: profileUrl(p.profile_path),
+    // The raw path rides along for the page's hero seed — seeds want TMDB
+    // paths, not the w185 URL the chip renders.
+    profilePath: p.profile_path,
   }));
 
   // Studios: deduped by NAME (TMDB lists the same company under multiple ids/regions),
@@ -216,6 +250,11 @@ const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
   // Where to watch, as data — so the card below can decide whether it has anything to
   // draw a border around before it draws one.
   const { providers, region } = useWatchProviders(String(movie.id));
+
+  // The studio taps' door + loop guard (the filmmakers list carries its own —
+  // it is a separate component with the same two hooks).
+  const { open: openPage } = useEntityOverlay();
+  const lineage = useSheetLineage();
 
   // The bento's bands, in reading order. Built as a list so the hairline BETWEEN bands is
   // decided in exactly one place: the first band never carries a rule (it would sit right
@@ -294,7 +333,8 @@ const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
         </View>
       )}
 
-      {/* Filmmakers — a clean name · role list (collapsible past three), open air. */}
+      {/* Filmmakers — B2 chip rows (collapsible past three), open air; every
+          row opens the person's page, grown out of its chip. */}
       {filmmakers.length > 0 && (
         <View style={styles.openSection}>
           <SectionHeader label="Filmmakers" />
@@ -315,7 +355,38 @@ const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
             const slots = studios.map((studio) => {
               const logo = studio.logo_path ? `https://image.tmdb.org/t/p/w300${studio.logo_path}` : null;
               return (
-                <View key={studio.id} style={styles.studioSlot}>
+                // ▸ EVERY MARK IS A DOOR TOO (same ruling): tap → the studio's
+                // page. NO grow — the wordmark rule: logos don't stretch into
+                // heroes, so the page uses the no-origin entrance search's
+                // text rows ship with. A styled Pressable is fine here for the
+                // same reason: no touch-derived rect is being read off it.
+                <Pressable
+                  key={studio.id}
+                  style={styles.studioSlot}
+                  onPress={() => {
+                    // Loop guard, symmetric with people: tapping the studio
+                    // whose page pushed this film folds back down to it.
+                    // (The entity kind is 'company' — TMDB's own noun; search
+                    // only SAYS "studio" in its captions.)
+                    if (lineage?.beneath?.kind === 'company' && lineage.beneath.id === studio.id) {
+                      lineage.dismissSheet();
+                      return;
+                    }
+                    prefetchEntity('company', studio.id);
+                    openPage({
+                      kind: 'company',
+                      id: studio.id,
+                      // No seed, matching search's company rows exactly — a
+                      // logo is not hero artwork ("never a TMDB logo",
+                      // services/search.ts), and the company page paints its
+                      // own header from the fetch.
+                      seed: null,
+                      origin: null,
+                    });
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={studio.name}
+                >
                   {logo ? (
                     // B&W duotone, Expo-Go safe (no pixel filters available): the
                     // tinted layer is the black-and-white look; the low-opacity
@@ -343,7 +414,7 @@ const MovieDetailsTab = ({ movie }: { movie: MovieDetails }) => {
                       {studio.name}
                     </Text>
                   )}
-                </View>
+                </Pressable>
               );
             });
 
@@ -456,29 +527,8 @@ const styles = StyleSheet.create({
     height: TMDB_MARK_H,
   },
 
-  // Filmmakers — plain rows: name left, role right.
-  fmRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 14,
-    paddingVertical: 6,
-  },
-  fmName: {
-    flex: 1,
-    color: 'rgba(255,255,255,0.92)',
-    fontSize: 14.5,
-    fontWeight: '600',
-  },
-  fmRole: {
-    flexShrink: 1,
-    color: 'rgba(156,202,223,0.75)',
-    fontSize: 10.5,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    textAlign: 'right',
-  },
+  // Filmmakers — rows are the shared PersonCard's B2 chip rows now; only the
+  // fold toggle's chrome still lives here.
   fmMoreBtn: {
     flexDirection: 'row',
     alignItems: 'center',
