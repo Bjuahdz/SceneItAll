@@ -5,6 +5,7 @@ import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withSpring,
+  withTiming,
 } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
 import Svg, { Path } from "react-native-svg";
@@ -56,9 +57,13 @@ import { SIGNAL } from "@/constants/signal";
  *     and the capsule travels empty — a word losing letters off both edges
  *     reads as clipping, not motion (Bryan, nav round 11).
  *
- * ▸ THE SPRING IS ALSO THE EXIT FIX. "Still a bit delayed on exit": the old
- *   in-out cubic spends its first beats nearly still, so a fold-triggered exit
- *   sat visibly frozen before moving. A spring is at full speed on frame one.
+ * ▸ THE EXIT IS A CUT, NOT A TRANSITION (Bryan's ruling, 2026-08-13, after
+ *   two rounds of tuning the collapse): "you're keeping this collapsed exit...
+ *   there's really no need for that. Just get rid of it fast." An exit does
+ *   not owe the entrance a reverse performance — the page is leaving and the
+ *   eye is on it, so anything the pill does with SHAPE on the way out reads
+ *   as an object hanging around. It now fades out whole, in place, in EXIT_MS,
+ *   and the bubble clock resets silently for the next entrance.
  *
  * ▸ ⚠ NO SCALE, EVER. The bubble is a WIDTH animation because the nav pill
  *   proved the alternative: a scale on that island cost it its blur (a
@@ -82,6 +87,10 @@ const INK = "#F2EDE4";
 const ACCENT = SIGNAL.accent;
 const ACCENT_LINE = "rgba(156, 202, 223, 0.5)";
 
+/** The cut. Fast enough to read as gone-at-once against the page's own fold,
+ *  slow enough not to strobe — a hard 0ms pop reads as a glitch, not a cut. */
+const EXIT_MS = 120;
+
 export default function SheetFilterPill({
   visible,
   filtered,
@@ -99,23 +108,40 @@ export default function SheetFilterPill({
   onPress: () => void;
 }) {
   const grow = useSharedValue(0);
+  // The cut's own clock: 0 = present, 1 = cut away. Separate from `grow` so
+  // the exit never touches the bubble's shape — the pill fades out WHOLE.
+  const out = useSharedValue(0);
   useEffect(() => {
-    grow.value = withSpring(visible ? 1 : 0, NAV_SPRING);
-  }, [visible, grow]);
+    if (visible) {
+      // A cancelled swipe (or any return) fades the pill back in fast; the
+      // first entrance is a no-op here (out is already 0) and the bubble
+      // spring below carries the arrival.
+      out.value = withTiming(0, { duration: EXIT_MS });
+      grow.value = withSpring(1, NAV_SPRING);
+    } else {
+      // THE CUT — see the header. Shape untouched; once the fade lands, the
+      // bubble clock resets silently so the next entrance blooms from zero.
+      out.value = withTiming(1, { duration: EXIT_MS }, (finished) => {
+        if (finished) grow.value = 0;
+      });
+    }
+  }, [visible, grow, out]);
 
   // The bubble. Width opens the room, translateX keeps the swell centred,
   // translateY is the rise from below. Opacity is a SLIVER GUARD, not a fade —
   // a hard 0/1 at a sliver-sized width, because a bordered zero-width capsule
-  // shows a hairline at rest (the nav pill's constant, same threshold).
+  // shows a hairline at rest (the nav pill's constant, same threshold) — and
+  // the CUT multiplies over the top of whatever the bubble is doing.
   //
   // Seated, the branch collapses to an EMPTY transform: the pill is a blur,
   // and glass under a live transform is this app's oldest scar. Springs snap
   // to their target on settle, so the branch does engage.
   const capsuleStyle = useAnimatedStyle(() => {
-    if (grow.value === 1) return { width: NAV_FILTER_W, opacity: 1, transform: [] };
+    if (grow.value === 1)
+      return { width: NAV_FILTER_W, opacity: 1 - out.value, transform: [] };
     return {
       width: grow.value * NAV_FILTER_W,
-      opacity: grow.value > 0.03 ? 1 : 0,
+      opacity: (grow.value > 0.03 ? 1 : 0) * (1 - out.value),
       transform: [
         { translateX: ((1 - grow.value) * NAV_FILTER_W) / 2 },
         { translateY: (1 - grow.value) * NAV_FILTER_RISE },
