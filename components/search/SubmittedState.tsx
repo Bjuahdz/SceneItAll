@@ -73,9 +73,8 @@ export default function SubmittedState({
           before you narrow it, and the order on screen says so. */}
       <KindRow value={kind} onChange={onKind} counts={kindCounts} />
 
-      {/* Every slot is a persistent, clipped, layout-animated wrapper — the same
-          accordion motion as the recents ledger; the full story lives on the
-          wrappers in DefaultState. */}
+      {/* Every slot is a persistent, clipped, layout-animated wrapper. The full
+          story lives on `accordionMotion` in Marquee.tsx. */}
       {results.map((r, i) => {
         const key = `${r.entityType}-${r.id}`;
         if (i === shown) {

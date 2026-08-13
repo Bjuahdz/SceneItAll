@@ -5,7 +5,7 @@ import { FONT, ROW, SIGNAL, TRACK } from "@/constants/signal";
 
 // The hairline-ruled label bar above every list on the search surface:
 // HOW IT WORKS / RECENT / MATCHING RECORDS / RELEASED / UPCOMING / THE COLLECTION /
-// ONE PICK / DID YOU MEAN.
+// DID YOU MEAN.
 //
 // Two alignments, both real and both on the boards:
 //   spread — label left, count hard right   (MATCHING RECORDS · 1265 FOUND)
