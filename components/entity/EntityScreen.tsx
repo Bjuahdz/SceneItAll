@@ -676,10 +676,8 @@ export default function EntityScreen({
     return () => controller.abort();
   }, [load]);
 
-  const openFilm = useCallback(
-    (film: EntityFilm) => router.push(`/movie/${film.id}`),
-    [router]
-  );
+  // openFilm lives BELOW the `page` memo (it stamps the page's identity onto the
+  // sheet it pushes, and a deps-array read above the declaration is a TDZ error).
 
   /**
    * ▸ THE FILMOGRAPHY IS THE SEARCH ACCORDION (Bryan, 2026-08-11: "these are not
@@ -773,6 +771,27 @@ export default function EntityScreen({
       truncated: false,
     };
   }, [entity, seed]);
+
+  /**
+   * DETAILS → the movie sheet, STAMPED with this page's identity (enhance/cast):
+   * the sheet's cast tab consults the stamp before opening a person page, and a
+   * tap on the very person the sheet is sitting on folds the sheet back down
+   * instead of stacking a duplicate page (Bryan's loop guard — "just bring down
+   * the bottom sheet"). A seed page carries id 0 until its fetch lands: no
+   * stamp rather than a wrong one, and the guard simply never fires.
+   */
+  const openFilm = useCallback(
+    (film: EntityFilm) =>
+      router.push(
+        page && page.id > 0
+          ? {
+              pathname: '/movie/[id]' as const,
+              params: { id: String(film.id), fromKind: page.kind, fromId: String(page.id) },
+            }
+          : { pathname: '/movie/[id]' as const, params: { id: String(film.id) } }
+      ),
+    [router, page]
+  );
 
   /*
    * ▸ THE SETTLE MACHINERY IS GONE — five builds of it (scroll-end snaps, silence
