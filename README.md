@@ -8,32 +8,43 @@ A React Native movie discovery app built with Expo. Browse trending and upcoming
 
 ## Features
 
-### Discovery (Search tab)
-The primary browsing experience lives on the **Search** tab:
+### Search — the primary surface
+Search covers films, shows, people, collections and studios in one pass:
 
-- **Hero carousel** — Recently popular movies with clean, textless poster artwork and title logos
-- **Trending** — Top searched movies, tracked via Appwrite and ranked by search frequency
-- **Upcoming** — Films releasing in the next few months
-- **Genre rows** — Curated horizontal lists (Drama, Action, Thriller, Sci-Fi, Comedy, Horror, Romance, Adventure, Family, and more)
-- **Box Office chart** — Interactive gain/loss visualization of recent cash cows and money pits (last 12 months)
-- **Search** — In-place movie search with results that feed the trending analytics pipeline
+- **Recents board** — a poster-tile grid of everything you've opened before
+- **Quick searches** — trending suggestions offered while the field is empty
+- **Kind row** — films · shows · people · collections · studios, as navigation rather than a filter
+- **Filter sheet** — sort, decade, genre and rating controls, scoped to whichever kind is on screen
+- **Graceful empties** — a first-run guide, did-you-mean suggestions, and honest no-artwork states
+
+### Entity pages
+Tap a person, collection or studio and you land on their own page: artwork, biography or facts,
+and a filmography whose rows expand in place into detail cards, with released and upcoming
+sections kept apart.
 
 ### Movie details
-Tap any movie to open a detail screen with:
+Tap any movie to open a detail sheet with:
 
 - Textless poster and title logo artwork
 - Overview, certification, runtime, budget, revenue, and profit
-- Directors, writers, and cast
-- Official YouTube trailers
-- Tabbed sections for cast, crew, and related info
+- People-forward cast and filmmaker sections — a face behind every name, each one a door to
+  that person's page
+- Where to watch, box office, and an artwork viewer
+- Official YouTube trailers, staged in a cinema mode
+- Voice **takes** — record a spoken reaction to a film, kept in a per-title journal
+
+### Discovery
+A separate **Discover** tab carries the browsing experience — hero carousel, trending, upcoming,
+genre rows, and an interactive box-office gain/loss chart.
 
 ### Navigation
-- Custom floating blur tab bar (Home · Search · Saved)
-- Voice-capture entry point (UI shell — capture flow not yet implemented)
+- A custom floating blur bar that morphs between poses and is never hidden
+- A detached search satellite that owns the search field
 - Deep linking via Expo Router (`/movie/[id]`)
 
-### Home dashboard
-A placeholder **Home** tab reserved for future personal stats, notes, and activity once user capture and auth flows exist.
+### Home
+A **Home** dashboard built from your own journal: your themes drawn as a constellation you can
+scrub, and a summary card of films, takes, time spoken and nights recorded.
 
 ---
 
@@ -45,10 +56,12 @@ A placeholder **Home** tab reserved for future personal stats, notes, and activi
 | Language | [TypeScript](https://www.typescriptlang.org/) |
 | Routing | [Expo Router v6](https://docs.expo.dev/router/introduction/) (file-based) |
 | Styling | [NativeWind v4](https://www.nativewind.dev/) (Tailwind CSS for React Native) |
-| Animation | [React Native Reanimated v4](https://docs.swmansion.com/react-native-reanimated/) · [Moti](https://moti.fyi/) |
+| Animation | [React Native Reanimated v4](https://docs.swmansion.com/react-native-reanimated/) · [React Native Gesture Handler](https://docs.swmansion.com/react-native-gesture-handler/) |
 | Images | [expo-image](https://docs.expo.dev/versions/latest/sdk/image/) |
 | Charts | [react-native-svg](https://github.com/software-mansion/react-native-svg) |
 | Backend | [Appwrite Cloud](https://cloud.appwrite.io/) (search analytics / trending) |
+| Local data | [expo-sqlite](https://docs.expo.dev/versions/latest/sdk/sqlite/) (slates, takes, preferences) |
+| Graphics | [React Native Skia](https://shopify.github.io/react-native-skia/) (the Home dashboard canvas) |
 | Movie data | [TMDB API v3](https://developer.themoviedb.org/docs) |
 
 ---
