@@ -70,8 +70,8 @@ const NAV_CLEARANCE = NAV_BOTTOM + NAV_BAR_H + 10;
 // pre-flight measure chain: the combination Bryan called "when it works, it works
 // and it looks amazing". The one lesson kept from the video rounds lives in the
 // pre-flight refresh (see onWindowLayout), where it costs nothing.
-export const GROW_MS = 340;
-export const FOLD_MS = 260;
+const GROW_MS = 340;
+const FOLD_MS = 260;
 const SNAP_MS = 180;
 
 /**

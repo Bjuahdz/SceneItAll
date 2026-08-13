@@ -1,10 +1,10 @@
 import React, { useEffect } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, {
+  interpolate,
   useAnimatedStyle,
   useSharedValue,
-  withTiming,
-  Easing,
+  withSpring,
 } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
 import Svg, { Path } from "react-native-svg";
@@ -14,11 +14,13 @@ import {
   NAV_BAR_R,
   NAV_BLUR_INTENSITY,
   NAV_FILTER_RECT,
+  NAV_FILTER_RISE,
+  NAV_FILTER_W,
   NAV_GLASS_RIM,
   NAV_GLASS_TINT,
 } from "@/constants/navMetrics";
+import { NAV_SPRING } from "@/contexts/NavMorphContext";
 import { SIGNAL } from "@/constants/signal";
-import { FOLD_MS, GROW_MS } from "./EntityScreen";
 
 /**
  * THE FILTER PILL, FOR AN ENTITY PAGE INSIDE A MOVIE SHEET.
@@ -33,39 +35,52 @@ import { FOLD_MS, GROW_MS } from "./EntityScreen";
  *   mean anything three sheets deep, and the nav's "never hides" law is about
  *   the nav, not about this. One control, one job.
  *
- * ▸ IT RISES, IT DOES NOT MORPH (his ruling on the entrance). On the search
- *   surface the pill is the nav CHANGING POSE — the discs trade the middle room
- *   away and the pill grows into it — and that motion is meaningless here,
- *   because there are no discs to trade with. So it simply comes up from below,
- *   centred, into the same seat it occupies everywhere else.
+ * ▸ IT PERFORMS THE NAV PILL'S OWN ENTRANCE. The first cut was a fade + rise on
+ *   the page's timing curve, and Bryan called it: "super boring and bland — we
+ *   want it to look like it's a bubble expanding into its location, similar to
+ *   how we have it looking in other locations." The other location IS the nav's
+ *   FILTER pill (_layout.tsx), and its entrance is a recipe, copied here move
+ *   for move:
+ *
+ *   · WIDTH opens the room — the capsule swells from nothing on NAV_SPRING,
+ *     the same spring every nav morph rides, so the two pills arrive with the
+ *     same character. The nav's swells from an edge because it splits a run of
+ *     islands open; this one is alone and centred, so it swells from its
+ *     CENTRE — translateX walks the box back by half the missing width, which
+ *     pins the capsule's midpoint to the seat's on every frame.
+ *   · THE RISE from below — NAV_FILTER_RISE, the nav's own number, now shared
+ *     from navMetrics so the two entrances cannot drift apart.
+ *   · INK ARRIVES LAST — the glyph and word fade in over the top of the swell
+ *     ([0.62, 1], the nav's seat-label ramp), so the pill opens itself a room
+ *     before anything is written in it. On the way out the ink leaves FIRST
+ *     and the capsule travels empty — a word losing letters off both edges
+ *     reads as clipping, not motion (Bryan, nav round 11).
+ *
+ * ▸ THE SPRING IS ALSO THE EXIT FIX. "Still a bit delayed on exit": the old
+ *   in-out cubic spends its first beats nearly still, so a fold-triggered exit
+ *   sat visibly frozen before moving. A spring is at full speed on frame one.
+ *
+ * ▸ ⚠ NO SCALE, EVER. The bubble is a WIDTH animation because the nav pill
+ *   proved the alternative: a scale on that island cost it its blur (a
+ *   UIVisualEffectView under a scaled ancestor stops sampling its backdrop and
+ *   renders as tint alone — Bryan's Chris Evans screenshot). Translations are
+ *   proven safe; scale is the one transform glass cannot wear.
  *
  * ▸ IT LANDS ON NAV_FILTER_RECT, which is DERIVED rather than measured (see
  *   navMetrics). That is what makes this cheap: the filter sheet grows out of
  *   that exact rect, so mounting the sheet here needs no origin plumbing and
  *   cannot drift from the nav's version by a pixel.
  *
- * Deliberately NOT a reuse of the nav's pill. That one is welded to pose
- * springs, an ink ramp and a ledger sink that exist to survive morphing between
- * three layouts; none of it has meaning for a control that only ever rises and
- * falls. What IS shared is the material — every colour, radius and metric here
- * comes from navMetrics, so the two pills cannot drift apart.
+ * Deliberately NOT a reuse of the nav's pill component. That one is welded to
+ * pose springs and a sheet-handoff ledger that exist to survive morphing
+ * between three layouts. What IS shared is the material and the choreography —
+ * every colour, radius, metric, spring and ramp here comes from navMetrics /
+ * NavMorphContext or is quoted from _layout.tsx with its reasoning.
  */
 
 const INK = "#F2EDE4";
 const ACCENT = SIGNAL.accent;
 const ACCENT_LINE = "rgba(156, 202, 223, 0.5)";
-
-/** How far below its seat the pill starts. A little under half its own height:
- *  far enough to read as arriving from off-screen, near enough that the rise
- *  never looks like it travelled. */
-const RISE = 26;
-
-/** ▸ IT MOVES ON THE PAGE'S CLOCK, NOT ITS OWN. The pill borrows the grow and
- *  fold durations from EntityScreen rather than keeping numbers beside them —
- *  a control that arrives on a different curve from the thing it belongs to
- *  reads as two events, which is exactly what Bryan saw ("mistimed... make it
- *  so that the entity page and the filter button happen at the same time").
- *  The page eases in-out cubic both ways; so does this. */
 
 export default function SheetFilterPill({
   visible,
@@ -83,38 +98,71 @@ export default function SheetFilterPill({
   filtered: boolean;
   onPress: () => void;
 }) {
-  const p = useSharedValue(0);
+  const grow = useSharedValue(0);
   useEffect(() => {
-    p.value = withTiming(visible ? 1 : 0, {
-      duration: visible ? GROW_MS : FOLD_MS,
-      easing: Easing.inOut(Easing.cubic),
-    });
-  }, [visible, p]);
+    grow.value = withSpring(visible ? 1 : 0, NAV_SPRING);
+  }, [visible, grow]);
 
-  // Transform-only, and an EMPTY transform once seated: the pill is a blur, and
-  // glass under a live transform is this app's oldest scar.
-  const style = useAnimatedStyle(() => {
-    if (p.value === 1) return { opacity: 1, transform: [] };
-    return { opacity: p.value, transform: [{ translateY: (1 - p.value) * RISE }] };
+  // The bubble. Width opens the room, translateX keeps the swell centred,
+  // translateY is the rise from below. Opacity is a SLIVER GUARD, not a fade —
+  // a hard 0/1 at a sliver-sized width, because a bordered zero-width capsule
+  // shows a hairline at rest (the nav pill's constant, same threshold).
+  //
+  // Seated, the branch collapses to an EMPTY transform: the pill is a blur,
+  // and glass under a live transform is this app's oldest scar. Springs snap
+  // to their target on settle, so the branch does engage.
+  const capsuleStyle = useAnimatedStyle(() => {
+    if (grow.value === 1) return { width: NAV_FILTER_W, opacity: 1, transform: [] };
+    return {
+      width: grow.value * NAV_FILTER_W,
+      opacity: grow.value > 0.03 ? 1 : 0,
+      transform: [
+        { translateX: ((1 - grow.value) * NAV_FILTER_W) / 2 },
+        { translateY: (1 - grow.value) * NAV_FILTER_RISE },
+      ],
+    };
   });
+
+  // The ink rides the seat-label ramp quoted above. It never moves: the
+  // centre-pinned swell keeps the capsule's midpoint fixed, so the row centred
+  // inside it holds still while the clip edges open around it.
+  const inkStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(grow.value, [0.62, 1], [0, 1], "clamp"),
+  }));
 
   const ink = filtered ? ACCENT : INK;
 
   return (
-    <Animated.View
-      pointerEvents={visible ? "box-none" : "none"}
-      style={[styles.seat, style]}
-    >
-      <View style={[styles.pill, { borderColor: filtered ? ACCENT_LINE : NAV_GLASS_RIM }]}>
-        {/* Born at its full rect and never resized — a visual-effect view
-            created at zero size never establishes a backdrop, which is the bug
-            the nav's own pill carries a paragraph about. */}
+    <View pointerEvents={visible ? "box-none" : "none"} style={styles.seat}>
+      <Animated.View
+        style={[
+          styles.pill,
+          // Static width PINNED to the pose endpoint, like the nav pill's: if
+          // a React commit lands mid-spring, Fabric may apply the static style
+          // for a frame before Reanimated re-asserts — unpinned, that frame
+          // resolves to AUTO and the capsule visibly jumps.
+          {
+            width: visible ? NAV_FILTER_W : 0,
+            borderColor: filtered ? ACCENT_LINE : NAV_GLASS_RIM,
+          },
+          capsuleStyle,
+        ]}
+      >
+        {/* ⚠ FIXED SIZE, NOT absoluteFill — the nav pill's blur lesson. This
+            capsule is born at width 0, and a visual-effect view created at
+            zero size never establishes a backdrop; resizing it later does not
+            recover one. Born at its full rect and never resized, it samples
+            correctly, and the capsule's own overflow clips it as the width
+            springs. */}
         <BlurView
           intensity={NAV_BLUR_INTENSITY}
           tint="dark"
           experimentalBlurMethod="dimezisBlurView"
-          style={StyleSheet.absoluteFill}
+          style={styles.blur}
         />
+        {/* absoluteFill, so the hit area is the capsule itself and shrinks to
+            nothing with it — a zero-width pill cannot be tapped by a stray
+            finger at rest. */}
         <Pressable
           onPress={onPress}
           disabled={!visible}
@@ -122,7 +170,7 @@ export default function SheetFilterPill({
           accessibilityRole="button"
           accessibilityLabel="Filter this filmography"
         >
-          <View style={styles.row}>
+          <Animated.View style={[styles.row, inkStyle]}>
             {/* The board's sliders glyph — three staggered faders, drawn as
                 broken lines so each knob sits IN its track. Same path data as
                 the nav's, because it is the same control. */}
@@ -142,10 +190,10 @@ export default function SheetFilterPill({
               />
             </Svg>
             <Text style={[styles.label, { color: ink }]}>FILTER</Text>
-          </View>
+          </Animated.View>
         </Pressable>
-      </View>
-    </Animated.View>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -166,13 +214,21 @@ const styles = StyleSheet.create({
     elevation: 2200,
   },
   pill: {
-    flex: 1,
+    position: "absolute",
+    left: 0,
+    top: 0,
+    height: NAV_BAR_H,
     borderRadius: NAV_BAR_R,
     overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
     backgroundColor: NAV_GLASS_TINT,
     borderWidth: 1,
+  },
+  blur: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: NAV_FILTER_W,
+    height: NAV_BAR_H,
   },
   hit: {
     ...StyleSheet.absoluteFillObject,

@@ -61,6 +61,8 @@ import {
   ESCAPE_COMMIT_P,
   ESCAPE_SEAT_SPRING,
   ESCAPE_STEP_MS,
+  ESCAPE_DISSOLVE_MS,
+  ESCAPE_DISSOLVE_BIT_MS,
 } from '@/contexts/MovieSheetContext';
 import { EntityOverlayHost, EntityOverlayProvider, useEntityOverlay } from '@/contexts/EntityOverlayContext';
 import FilterSheet from '@/components/entity/FilterSheet';
@@ -226,6 +228,7 @@ interface MovieDetailsViewProps {
     holdP: SharedValue<number>;
     knotTy: SharedValue<number>;
     armedP: SharedValue<number>;
+    dissolveP: SharedValue<number>;
   };
   // True while a drag is displacing the sheet: the inner scroll is disabled so a
   // reversing finger moves the SHEET back up rather than scrolling the content
@@ -252,7 +255,7 @@ type HeroArtwork = {
   logo: string | null;     // title logo laid over the hero
 };
 
-// ── THE ESCAPE HOLD — the chevron and its track ─────────────────────────────
+// ── THE ESCAPE HOLD — the chevron, its ring, and its track ──────────────────
 //
 // Deep-stack clear-all (Bryan, 2026-08-12). Hold the close control from two
 // stacked sheets and a track appears beneath it — a subtle grey pill whose
@@ -260,6 +263,14 @@ type HeroArtwork = {
 // slides down it, gaining weight as it goes, and floods with the one violet
 // at the foot. Release there and the whole tower cascades home; release
 // anywhere short and the chevron rides back to its seat with nothing changed.
+//
+// ▸ THE RING (his ask, 2026-08-13): the escape's one real cost was always
+//   invisibility — nothing said the hold existed. Now a circle of the track's
+//   own glass sits around the chevron whenever the hold is armed: "a stack is
+//   present; hold, and it rewinds." It is not a new shape — the circle IS the
+//   track's top cap (same width, same cap radius, same material), so when the
+//   hold matures the ring simply GROWS DOWNWARD into the full track. One
+//   capsule extending, not two things swapping.
 //
 // ▸ ONE GESTURE, NOT A BUTTON WITH EXTRAS. A Pan with activateAfterLongPress
 //   is the hold AND the pull, so the finger never has to be re-recognised at
@@ -276,8 +287,159 @@ type HeroArtwork = {
 //   because each of those already has its own absolute writer.
 //
 // ▸ ARMED ONLY AT DEPTH (ESCAPE_MIN_SHEETS): below two stacked sheets the
-//   hold is disabled outright — the chevron is just a chevron, and this
-//   control is byte-identical to what shipped before the escape existed.
+//   hold is disabled outright — the chevron is just a chevron, no ring, and
+//   this control is byte-identical to what shipped before the escape existed.
+
+// The glass's one sheen — a horizontal white gradient that reads as a tube.
+// Shared by the ring and the track because they are the same object at two
+// lengths; two copies of these stops is a cap that stops matching its shaft.
+const ESCAPE_GLASS_SHEEN = [
+  'rgba(255,255,255,0.10)',
+  'rgba(255,255,255,0.02)',
+  'rgba(255,255,255,0.07)',
+] as const;
+
+// ── THE DISSOLVE — the commit's confirmation (his ask, 2026-08-13) ──────────
+//
+// Released at the foot, the pill no longer fades in place: it ERODES from the
+// bottom up — the same direction the pull travelled — and every bit of glass
+// the rising edge frees pops off as a small ultraviolet particle, drifts, and
+// fades. The instrument's own material carries the commit colour out.
+//
+// One LINEAR clock (dissolveP, 0→1 over ESCAPE_DISSOLVE_MS) drives all of it
+// as pure functions: the erosion runs the first EROS_F of the clock, and each
+// bit's flight window opens at the exact tick the edge crosses its seat. No
+// timers, no per-bit springs, nothing frame-stepped.
+//
+// The dissolve plays on a STILL SCREEN: the cascade holds for one break
+// (ESCAPE_CASCADE_LEAD_MS, see MovieSheetContext) before its first card
+// moves, because round 1 proved a corner flourish cannot compete with a
+// full-screen slide — he saw nothing at all.
+
+/** Fraction of the clock the erosion takes; the last bit's flight fills the
+ *  rest, so the final particle dies exactly as the clock ends. */
+const ESCAPE_EROS_F = (ESCAPE_DISSOLVE_MS - ESCAPE_DISSOLVE_BIT_MS) / ESCAPE_DISSOLVE_MS;
+/** One bit's flight, as a fraction of the same clock. */
+const ESCAPE_BIT_F = ESCAPE_DISSOLVE_BIT_MS / ESCAPE_DISSOLVE_MS;
+
+/** The bits' colours — the P1 ULTRAVIOLET TIERS, his locked commit palette
+ *  (core → #EDE9FE → #C4B5FD → rim #8B5CF6 → deep #6D28D9, with the unify UV
+ *  in the middle). One flat hex was part of round 3's "cartoony": real embers
+ *  vary — most debris sits in the middle tiers, the odd white-violet spark
+ *  flares, the odd deep chip smoulders. */
+const ESCAPE_BIT_TINTS = ['#EDE9FE', '#C4B5FD', ESCAPE_UV_UNIFY, '#8B5CF6', '#6D28D9'] as const;
+
+/** The bits — round 4, and where the design SETTLED (Bryan, 2026-08-13:
+ *  "go back to the previous one... it looked fine"). A round 5 tried finer
+ *  sand-grade motes (0.9–1.8 radii, 75 of them, three tonal tiers, no
+ *  shards) and was REVERTED on his call — don't re-walk it. What reads:
+ *  · no lattice — x scatters across the full slab, row seats jitter ±4;
+ *  · grain — radii 1.5–3.2 with SIZE-CORRELATED physics (dust flies fast and
+ *    far, chunks barely leave the wound and linger);
+ *  · every bit owns a lifetime, a peak brightness, a tier colour, a curl and
+ *    (for the one-in-four glass SHARDS — squarish, spinning) a spin, so no
+ *    two flights match;
+ *  all still deterministic golden-ratio jitter — hand-placed randomness
+ *  without a random source, so every commit scatters the same way.
+ *  Coordinates are the OVERLAY's (centre column x=20, track top y=2 — see
+ *  styles.escapeTrack). */
+const ESCAPE_BIT_ROWS = Math.round(ESCAPE_TRAVEL / 10) + 1;
+const ESCAPE_BITS_PER_ROW = 3;
+const ESCAPE_BITS = Array.from({ length: ESCAPE_BIT_ROWS * ESCAPE_BITS_PER_ROW }, (_, n) => {
+  const row = Math.floor(n / ESCAPE_BITS_PER_ROW);
+  const j1 = (n * 0.618) % 1;
+  const j2 = (n * 0.382) % 1;
+  const j3 = (n * 0.236) % 1;
+  const j4 = (n * 0.786) % 1;
+  const j5 = (n * 0.451) % 1;
+  const seatY =
+    ESCAPE_TRACK_H - ESCAPE_TRACK_LEAD - (row * ESCAPE_TRAVEL) / (ESCAPE_BIT_ROWS - 1) +
+    (j2 * 2 - 1) * 4;
+  const x = 20 + (j1 * 2 - 1) * 13;
+  const r = 1.5 + j2 * 1.7;
+  // Dust departs, chunks linger: velocity falls off with radius, so the
+  // heavy pieces stay near the wound while the fine grain carries the energy.
+  const vel = (3.6 - r) / 2.1;
+  // The release tick (edge at H·(1 − dissolveP/EROS_F) crosses this seat),
+  // jittered so neighbours break as crumbs, not as a rank...
+  const p0 = Math.max(0, (1 - seatY / ESCAPE_TRACK_H) * ESCAPE_EROS_F + (j3 * 2 - 1) * 0.02);
+  // ...and a lifetime of its own, clamped so the last ember still dies before
+  // the route (and the instrument with it) unmounts at the clock's end.
+  const life = Math.min(0.7 + j4 * 0.5, (0.98 - p0) / ESCAPE_BIT_F);
+  const shard = n % 4 === 2;
+  return {
+    x,
+    y: 2 + seatY,
+    // Outward from the centre plus jitter, scaled by the grain's velocity;
+    // UP against the erosion's rise, like grit off a grinder — never down,
+    // which would read as dripping.
+    dx: ((x - 20) * 1.0 + (j2 * 2 - 1) * 8) * vel,
+    dy: -(6 + j3 * 14) * vel - 3,
+    r,
+    p0,
+    life,
+    // A gentle sideways arc mid-flight — debris curls, lasers don't.
+    curl: (j5 * 2 - 1) * 4,
+    // One in four is a SHARD — a squarish chip of the glass that spins as it
+    // leaves; the rest are round embers and don't (spin on a circle is
+    // invisible, so it isn't paid for).
+    shape: shard ? r * 0.35 : r,
+    spin: shard ? (j5 * 2 - 1) * 200 : 0,
+    peakO: 0.55 + j4 * 0.45,
+    color: ESCAPE_BIT_TINTS[j1 < 0.07 ? 0 : j1 < 0.3 ? 1 : j1 < 0.68 ? 2 : j1 < 0.92 ? 3 : 4],
+  };
+});
+
+function DissolveDot({
+  dissolveP,
+  spec,
+}: {
+  dissolveP: SharedValue<number>;
+  spec: (typeof ESCAPE_BITS)[number];
+}) {
+  const style = useAnimatedStyle(() => {
+    const u = Math.min(
+      1,
+      Math.max(0, (dissolveP.value - spec.p0) / (ESCAPE_BIT_F * spec.life))
+    );
+    // Out of its window the bit costs nothing — and dissolveP only moves
+    // during a commit, so at rest these worklets never re-evaluate at all.
+    if (u === 0 || u === 1) return { opacity: 0, transform: [{ scale: 0.01 }] };
+    // BURST THEN GLIDE: debris leaves the wound fast and decelerates — a
+    // linear flight was a big part of round 3's "cartoony". The curl bends
+    // the path sideways mid-flight and returns; shards spin as they go.
+    const uu = 1 - (1 - u) * (1 - u);
+    return {
+      // Pop over the first beats of the flight, fade over the rest, each to
+      // its own peak — embers and sparks, not 45 copies of one dot.
+      opacity: (u < 0.18 ? u / 0.18 : 1 - (u - 0.18) / 0.82) * spec.peakO,
+      transform: [
+        { translateX: uu * spec.dx + Math.sin(u * Math.PI) * spec.curl },
+        { translateY: uu * spec.dy },
+        { rotate: `${u * spec.spin}deg` },
+        { scale: 1 - 0.45 * u },
+      ],
+    };
+  });
+  return (
+    <ReAnimated.View
+      pointerEvents="none"
+      style={[
+        {
+          position: 'absolute',
+          left: spec.x - spec.r,
+          top: spec.y - spec.r,
+          width: spec.r * 2,
+          height: spec.r * 2,
+          borderRadius: spec.shape,
+          backgroundColor: spec.color,
+          opacity: 0,
+        },
+        style,
+      ]}
+    />
+  );
+}
 
 function EscapeControl({
   nested,
@@ -292,6 +454,7 @@ function EscapeControl({
     holdP: SharedValue<number>;
     knotTy: SharedValue<number>;
     armedP: SharedValue<number>;
+    dissolveP: SharedValue<number>;
   };
 }) {
   const { sheetCount, escape, escaping, escapeCascade } = useMovieSheet();
@@ -299,7 +462,7 @@ function EscapeControl({
   // overlay above the card); this control is the gesture that winds them.
   // knotTy is the finger: raw translation to ESCAPE_TRAVEL, then rubber past
   // it (a third of the extra, capped) — stretchy, never floppy.
-  const { holdP, knotTy, armedP } = clocks;
+  const { holdP, knotTy, armedP, dissolveP } = clocks;
   // THE SNAP's state: wasArmed edge-detects the heavy haptic; committed parks
   // the whole control once a drop is under way — from that frame the provider
   // owns the exit and nothing here may reset the clocks.
@@ -308,11 +471,21 @@ function EscapeControl({
 
   // A gesture's enabled flag is a JS prop, so the depth test lives in React
   // state mirrored off the provider's count. Flips only on sheet mount/unmount.
+  // The RING rides the same test on the same reaction: it is the depth test
+  // made visible, so the two must be one predicate or they will disagree.
+  // Break clock for the fade — the instrument's own appear/disappear tempo —
+  // and in practice the only flip a user ever watches is the ring LEAVING
+  // (dismiss the second sheet, land on the base, the invitation withdraws);
+  // a top sheet mounts with the count already deep, so the ring fades in
+  // under the card's own entrance.
+  const ringP = useSharedValue(0);
   const [armed, setArmed] = useState(false);
   useAnimatedReaction(
     () => sheetCount.value >= ESCAPE_MIN_SHEETS,
     (deep, prev) => {
-      if (deep !== prev) runOnJS(setArmed)(deep);
+      if (deep === prev) return;
+      ringP.value = withTiming(deep ? 1 : 0, { duration: ESCAPE_BREAK_MS });
+      runOnJS(setArmed)(deep);
     },
     [sheetCount]
   );
@@ -399,6 +572,10 @@ function EscapeControl({
           // hold must not start writing the escape value under them.
           if (escaping.value === 1) return;
           escapeHoldSV.value = 1;
+          // A committing hold always ends in this route unmounting, so a stale
+          // dissolve should be impossible — but a fresh hold owes a clean slate
+          // more than it owes that argument.
+          dissolveP.value = 0;
           holdP.value = withTiming(1, { duration: ESCAPE_BREAK_MS });
           runOnJS(breakTick)();
           runOnJS(startPulse)();
@@ -441,7 +618,17 @@ function EscapeControl({
           // last layer is gone; the provider brings it home.
           if (escape.value >= ESCAPE_COMMIT_P) {
             committed.value = 1;
-            holdP.value = withTiming(0, { duration: 240 });
+            // THE DISSOLVE owns the instrument's exit now: holdP deliberately
+            // STAYS at 1 (an opacity fade racing the erosion would dim the
+            // surviving glass twice), and the linear clock does the rest —
+            // the pill erodes bottom-to-top, shedding ultraviolet bits, while
+            // the cascade it confirmed starts underneath. Linear on purpose:
+            // per-bit windows are cuts of this clock, so an eased clock would
+            // bunch the bits it promises an even rain of.
+            dissolveP.value = withTiming(1, {
+              duration: ESCAPE_DISSOLVE_MS,
+              easing: Easing.linear,
+            });
             runOnJS(stopPulse)();
             runOnJS(escapeCascade)();
           }
@@ -459,7 +646,7 @@ function EscapeControl({
           knotTy.value = withSpring(0, ESCAPE_SEAT_SPRING);
           escape.value = withSpring(0, ESCAPE_SEAT_SPRING);
         }),
-    [armed, escapeHoldSV, holdP, knotTy, escape, escaping, armedP, wasArmed, committed, breakTick, armTick, startPulse, stopPulse, escapeCascade]
+    [armed, escapeHoldSV, holdP, knotTy, dissolveP, escape, escaping, armedP, wasArmed, committed, breakTick, armTick, startPulse, stopPulse, escapeCascade]
   );
 
   const tap = useMemo(
@@ -496,6 +683,14 @@ function EscapeControl({
   const chevronStyle = useAnimatedStyle(() => ({
     opacity: (1 - holdP.value) * (1 - standDown.value),
   }));
+  // The ring hands off the same way, to the overlay's capsule: it fades on the
+  // SAME break clock the capsule fades in on, aligned to the same pixel and
+  // the same 36pt circle, so the composite reads as one piece of glass that
+  // starts growing. It also stands down with the chevron it rings, and its
+  // ceiling is 0.9 — the track's own — so the crossfade trades like for like.
+  const ringStyle = useAnimatedStyle(() => ({
+    opacity: ringP.value * (1 - holdP.value) * (1 - standDown.value) * 0.9,
+  }));
 
   return (
     <GestureDetector gesture={composed}>
@@ -511,6 +706,23 @@ function EscapeControl({
           if (e.nativeEvent.actionName === 'activate') onBack();
         }}
       >
+        {/* THE RING — under the glyph, so the glass sits behind the chevron
+            the way it does everywhere else in the app. Rings the CONTROL, not
+            an arrow: on a nested detail the glyph is chevron-back and the
+            hold still works (the gesture binds to the control), so the
+            invitation stands there too. */}
+        <ReAnimated.View
+          pointerEvents="none"
+          style={[styles.escapeGlass, styles.escapeRing, ringStyle]}
+        >
+          <LinearGradient
+            colors={ESCAPE_GLASS_SHEEN}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={StyleSheet.absoluteFill}
+            pointerEvents="none"
+          />
+        </ReAnimated.View>
         <ReAnimated.View style={chevronStyle}>
           {/* Nested detail slid in from the right → back chevron; root sheet → down. */}
           <Ionicons
@@ -1876,23 +2088,54 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  // THE TRACK's body — a subtle grey pill, seated so the chevron's rest
-  // position is the centre of its top cap: the overlay's own centre is
-  // (20, 20), and the cap radius is LEAD.
+  // THE ESCAPE GLASS — one material for the ring and the track, because they
+  // are the same object at two lengths: a subtle grey body, a hairline rim,
+  // and (at the call sites) the shared horizontal sheen. Two copies of this
+  // recipe is a cap that stops matching its shaft the day one is tuned.
+  escapeGlass: {
+    overflow: 'hidden',
+    backgroundColor: 'rgba(146,142,136,0.16)',
+    borderWidth: 0.5,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  // THE RING's geometry — the track's top cap, verbatim, centred in the 40pt
+  // close control ((40 − W) / 2 off each edge) so it sits around the resting
+  // chevron at exactly the pixel the overlay capsule occupies on hold.
+  escapeRing: {
+    position: 'absolute',
+    left: (40 - ESCAPE_TRACK_W) / 2,
+    top: (40 - ESCAPE_TRACK_W) / 2,
+    width: ESCAPE_TRACK_W,
+    height: ESCAPE_TRACK_W,
+    borderRadius: ESCAPE_TRACK_LEAD,
+  },
+  // THE TRACK's geometry — seated so the chevron's rest position is the centre
+  // of its top cap: the overlay's own centre is (20, 20), and the cap radius
+  // is LEAD. Static height pinned to the REST pose (the circle) with opacity
+  // 0: if a raced React commit ever lands a frame of static style mid-hold,
+  // it renders nothing for that frame rather than a wrong-length capsule —
+  // the element spends nearly all its life at rest, invisible.
   escapeTrack: {
     position: 'absolute',
     left: 20 - ESCAPE_TRACK_LEAD,
     top: 20 - ESCAPE_TRACK_LEAD,
     width: ESCAPE_TRACK_W,
-    height: ESCAPE_TRACK_H,
+    height: ESCAPE_TRACK_W,
+    opacity: 0,
     borderRadius: ESCAPE_TRACK_LEAD,
-    overflow: 'hidden',
     // Stretches about its top cap, so the seat stays put and only the far end
     // gives — see trackStyle.
     transformOrigin: 'top',
-    backgroundColor: 'rgba(146,142,136,0.16)',
-    borderWidth: 0.5,
-    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  // THE FRONT's seat — the eroding capsule's own bottom edge. `bottom: 0`
+  // inside an animated height is what pins it to the wound for free; the
+  // capsule's overflow clips whatever the cut hasn't reached yet.
+  escapeFront: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 12,
   },
   // Semi-collapsed synopsis, just under the hero logo. Horizontal inset matches the meta
   // row + the details card (MovieTabBar) below — everything aligns to a single 20px column.
@@ -2025,7 +2268,14 @@ const MovieDetailsScreen = () => {
   const holdP = useSharedValue(0);
   const knotTy = useSharedValue(0);
   const armedP = useSharedValue(0);
-  const escapeClocks = useMemo(() => ({ holdP, knotTy, armedP }), [holdP, knotTy, armedP]);
+  // The commit's one-shot: 0 at rest, wound 0→1 (linear) the moment a release
+  // at the foot commits. Everything the dissolve does — the erosion, every
+  // bit's flight, the glyph's consumption — is a pure function of it.
+  const dissolveP = useSharedValue(0);
+  const escapeClocks = useMemo(
+    () => ({ holdP, knotTy, armedP, dissolveP }),
+    [holdP, knotTy, armedP, dissolveP]
+  );
   const screenH = Dimensions.get('window').height;
   // The card's top edge: below the status bar, leaving SHEET_TOP_GAP of the
   // receded screen in view — the sliver that says "your place is kept".
@@ -2324,14 +2574,36 @@ const MovieDetailsScreen = () => {
   // THE TRAVELLING CHEVRON — the same glyph the control hides, now on the
   // track: it appears exactly as the control's own chevron fades (same pixel,
   // opposite ramps), rides the finger, and gains weight as it nears the drop.
-  const puckStyle = useAnimatedStyle(() => ({
-    opacity: holdP.value,
-    transform: [{ translateY: knotTy.value }, { scale: 1 + ESCAPE_SWELL * escape.value }],
-  }));
+  const puckStyle = useAnimatedStyle(() => {
+    // CONSUMED BY THE EROSION: on commit the glyph sits at the foot — exactly
+    // where the dissolve starts — so it fades precisely as the rising edge
+    // crosses its 26pt body, eaten with the glass rather than fading beside
+    // it. Gated on a live dissolve: at rest the edge formula would graze an
+    // overpulled glyph and dim it mid-hold.
+    let vis = 1;
+    if (dissolveP.value > 0) {
+      const e = Math.min(1, dissolveP.value / ESCAPE_EROS_F);
+      const edgeY = ESCAPE_TRACK_H * (1 - e);
+      const glyphTop = ESCAPE_TRACK_LEAD + knotTy.value - 13;
+      vis = Math.min(1, Math.max(0, (edgeY - glyphTop) / 26));
+    }
+    return {
+      opacity: holdP.value * vis,
+      transform: [{ translateY: knotTy.value }, { scale: 1 + ESCAPE_SWELL * escape.value }],
+    };
+  });
   // Armed at the foot, the glyph floods with the one violet.
   const puckTintStyle = useAnimatedStyle(() => ({ opacity: armedP.value }));
-  // THE TRACK — the chevron's path. It appears with the hold, and its LENGTH
-  // is the whole readout: this far, and you are out.
+  // THE TRACK — the chevron's path. On hold it GROWS OUT OF THE RING: height
+  // runs cap-diameter → full length on the break clock, and since the circle
+  // is exactly the track's top cap, the ring reads as extending downward into
+  // the field rather than a field appearing. Its full LENGTH is the whole
+  // readout: this far, and you are out. An animated HEIGHT, deliberately not
+  // a scaleY — a circle scaled tall is an ellipse, and the caps must stay
+  // round the whole way. Resizing is safe here for the same reason the body
+  // is matte: this thing was denied a BlurView precisely because it resizes
+  // and stretches (two standing blur scars), and a LinearGradient re-rendering
+  // at a new height is just paint.
   //
   // It also takes the give at the ends, and THE END THAT GIVES IS THE ONE THE
   // THUMB IS PUSHING AGAINST (his correction: going back up "should not
@@ -2351,14 +2623,54 @@ const MovieDetailsScreen = () => {
     const over = knotTy.value - Math.min(ESCAPE_TRAVEL, Math.max(0, knotTy.value));
     const up = Math.max(0, -over);
     const down = Math.max(0, over);
+    // THE EROSION — on commit the bottom edge rises to the top (height → 0
+    // with the top pinned, the same trick as the growth, run to the other
+    // end), freeing ultraviolet bits at every seat it crosses. The last-sliver
+    // fade keeps a 0-height bordered view from printing a hairline full stop.
+    const e = Math.min(1, dissolveP.value / ESCAPE_EROS_F);
+    // THE RAW CUT (round 3): a disintegrating edge must not keep its cap — a
+    // full-radius bottom made every frame of the erosion look like a shorter
+    // but INTACT pill, seated and finished ("the particles push it out of the
+    // way"). The bottom corners square off over the first beats of the
+    // dissolve, so what retreats is visibly a torn edge, not a smaller pill.
+    const cut = Math.min(1, e / 0.05);
     return {
-      opacity: holdP.value * 0.9,
+      opacity: holdP.value * 0.9 * (e > 0.92 ? (1 - e) / 0.08 : 1),
+      borderBottomLeftRadius: ESCAPE_TRACK_LEAD - (ESCAPE_TRACK_LEAD - 4) * cut,
+      borderBottomRightRadius: ESCAPE_TRACK_LEAD - (ESCAPE_TRACK_LEAD - 4) * cut,
+      // Circle → pill on the same clock the ring hands off on — with a floor:
+      // the pull is live from the hold's first frame, so a violent yank could
+      // outrun the 180ms growth and ride the glyph out of the glass. The
+      // capsule is therefore never shorter than the finger requires (puck
+      // depth + one cap diameter puts the glyph at the bottom cap's centre,
+      // exactly where a full-length track would hold it) — a fast pull reads
+      // as the finger DRAWING the track out of the ring. The stretch maths
+      // below stays honest because the give only exists past full travel,
+      // where both terms have the height at ESCAPE_TRACK_H again.
+      height:
+        Math.min(
+          ESCAPE_TRACK_H,
+          Math.max(
+            ESCAPE_TRACK_W + holdP.value * (ESCAPE_TRACK_H - ESCAPE_TRACK_W),
+            knotTy.value + ESCAPE_TRACK_W
+          )
+        ) * (1 - e),
       transform: [
         { translateY: -up },
         { scaleY: (ESCAPE_TRACK_H + up + down) / ESCAPE_TRACK_H },
       ],
     };
   });
+  // THE FRONT — the conversion line (round 3). The glass right at the eroding
+  // edge charges ultraviolet before it breaks, so the material visibly TURNS
+  // INTO the bits instead of merely ending where they begin. It is pinned to
+  // the capsule's own bottom (`bottom: 0` inside the shrinking height), so it
+  // rides the wound with zero plumbing of its own; this style only gates it —
+  // invisible at rest and during a hold, in over the dissolve's first beats,
+  // gone with the track's own tail fade.
+  const frontStyle = useAnimatedStyle(() => ({
+    opacity: dissolveP.value > 0 ? Math.min(1, dissolveP.value / 0.05) : 0,
+  }));
 
   const lineage = useMemo(() => ({ beneath, dismissSheet }), [beneath, dismissSheet]);
 
@@ -2610,16 +2922,37 @@ const MovieDetailsScreen = () => {
         >
           {/* THE TRACK — a vertical pill in a very subtle grey behind the
               chevron's path, faintly glassy. Drawn first, so the glyph rides
-              over it. */}
-          <ReAnimated.View style={[styles.escapeTrack, trackStyle]}>
+              over it. It arrives by GROWING out of the control's ring (see
+              trackStyle) — same material, same pixel, one capsule at two
+              lengths. */}
+          <ReAnimated.View style={[styles.escapeGlass, styles.escapeTrack, trackStyle]}>
             <LinearGradient
-              colors={['rgba(255,255,255,0.10)', 'rgba(255,255,255,0.02)', 'rgba(255,255,255,0.07)']}
+              colors={ESCAPE_GLASS_SHEEN}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 0 }}
               style={StyleSheet.absoluteFill}
               pointerEvents="none"
             />
+            {/* THE FRONT — see frontStyle. 8-digit-hex alphas over the one
+                UV, the FilterSheet's own trick, so the front cannot drift
+                off the commit colour. */}
+            <ReAnimated.View pointerEvents="none" style={[styles.escapeFront, frontStyle]}>
+              <LinearGradient
+                colors={[`${ESCAPE_UV_UNIFY}00`, `${ESCAPE_UV_UNIFY}B3`]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 0, y: 1 }}
+                style={StyleSheet.absoluteFill}
+                pointerEvents="none"
+              />
+            </ReAnimated.View>
           </ReAnimated.View>
+          {/* THE BITS — outside the track (its overflow would clip their
+              drift), under the puck. Idle they are invisible and their
+              worklets never run; a commit is the only thing that moves their
+              clock. */}
+          {ESCAPE_BITS.map((b, i) => (
+            <DissolveDot key={i} dissolveP={dissolveP} spec={b} />
+          ))}
           <ReAnimated.View
             pointerEvents="none"
             style={[StyleSheet.absoluteFill, styles.escapeCenter, puckStyle]}

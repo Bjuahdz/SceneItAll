@@ -40,6 +40,7 @@ import {
   NAV_GLASS_RIM,
   NAV_GLASS_TINT,
   NAV_ICON,
+  NAV_FILTER_RISE,
   NAV_FILTER_W,
   NAV_ISLAND_GAP,
   NAV_LABEL_GAP,
@@ -182,7 +183,10 @@ const PILL_W_FULL = BAR_PAD * 2 + SLOT_W * 4 + LABEL_W_MAX + LABEL_GAP;
 const FILTER_W = NAV_FILTER_W;
 // How far below the bar the pill starts its rise. A bubble surfacing, not a
 // slide-in from offscreen. The same number sinks it back on the way out.
-const FILTER_RISE = px(18);
+// Imported, not recomputed: the sheet-borne entity page performs this same
+// entrance (SheetFilterPill), and two copies of the rise is two pills that
+// drift apart the day one of them is tuned.
+const FILTER_RISE = NAV_FILTER_RISE;
 // Search open, keyboard down: the field runs from the pill all the way to the right
 // margin. Nothing is reserved for the ✕ — an empty slot sitting there before there
 // is any keyboard to dismiss just reads as a hole in the bar.
