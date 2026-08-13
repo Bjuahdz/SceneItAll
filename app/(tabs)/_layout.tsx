@@ -624,6 +624,16 @@ function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
    * documented ~260ms where `expanded` and `entityOpen` are both true: `folded`
    * covers that window, so the pill holds its room instead of flickering out of
    * it and back.
+   *
+   * ▸ DELIBERATELY NOT GATED ON THE PAGE HAVING CONTENT. The skeleton rule
+   * (Bryan, 2026-08-13: no FILTER control "when there is nothing, at least
+   * visibly, to filter by") applies to the SHEET-BORNE pill only — it was
+   * tried here and REVERTED the same day, on his screenshot: this pill is the
+   * MIDDLE OF ONE BAR, and a pose that lands as two discs with a hole between
+   * them reads as broken chrome, not as restraint ("leaves this really weird
+   * gap here, and that looks way off"). The sheet-borne pill is a lone
+   * control with no run around it, so it alone waits for the filmography
+   * (see SheetFilterPill's gate). Do not re-gate this one.
    */
   const filterPose = onEntity || folded;
 
