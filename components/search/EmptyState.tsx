@@ -6,10 +6,15 @@ import { FONT, ROW, SEARCH_LAYOUT, SIGNAL, TRACK, TRACK2 } from "@/constants/sig
 
 // The new-account state, from board RZM-0.
 //
-// A fresh account has no recents AND no takes, so there is no honest ONE PICK — and
-// the gap is deliberately NOT filled with trending or popular films. That would turn
-// Search into Discover and erase the intent-vs-free-roam split between the two tabs.
-// Instead the screen teaches the loop it wants you to run.
+// A fresh account has no recents and nothing to show, and the gap is deliberately
+// NOT filled with trending or popular films. That would turn Search into Discover
+// and erase the intent-vs-free-roam split between the two tabs. Instead the screen
+// teaches the loop it wants you to run.
+//
+// ⚠ THAT SPLIT IS NOW THE WHOLE RULE (Bryan, 2026-08-13). Search is a search flow
+// and nothing else. ONE PICK — a recommendation drawn from your own takes — used
+// to sit at the foot of the recents ledger, and was deleted with it precisely
+// because recommending is Discover's job. If it returns, it returns over there.
 
 const STEPS = [
   { title: "SEARCH A FILM", desc: "Tap the field below and type a title." },

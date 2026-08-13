@@ -22,20 +22,12 @@ const STROKE = 1.5;
 
 type G = { size?: number; color?: string };
 
-export const ChevronDown = ({ size = 13, color = "#6F6862" }: G) => (
-  <Svg width={size} height={size} viewBox="0 0 12 12">
-    <Path
-      d="M2.4 4.4L6 8L9.6 4.4"
-      fill="none"
-      stroke={color}
-      strokeWidth={STROKE}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </Svg>
-);
+// chevron-DOWN has no drawer left: the recents ledger was the last surface that
+// opened a row in place, and it went with ONE PICK on 2026-08-13. The law above
+// keeps the meaning reserved — if something opens in place again, draw it at
+// 12/1.5 like its siblings here rather than inventing a second weight.
 
-export const ChevronUp = ({ size = 13, color = "#D6CFC5" }: G) => (
+export const ChevronUp =({ size = 13, color = "#D6CFC5" }: G) => (
   <Svg width={size} height={size} viewBox="0 0 12 12">
     <Path
       d="M2.4 7.6L6 4L9.6 7.6"

@@ -25,7 +25,7 @@ import { View } from "react-native";
  *   focus. The board returns when the KEYBOARD goes down.
  *
  * A component rather than a bare `return null` because every sibling state is one
- * (EmptyState, ZeroResults, DefaultState, SubmittedState), and it names itself in
+ * (EmptyState, ZeroResults, RecentsBoard, SubmittedState), and it names itself in
  * the render tree.
  *
  * ▸ COMPOSE DID EVENTUALLY EARN SOMETHING — QUICK SEARCHES (2026-08-08) — and it

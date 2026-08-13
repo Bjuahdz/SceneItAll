@@ -39,9 +39,9 @@ import type { SearchEntityType } from "@/services/db";
  * THE CARD SPANS THE CONTENT COLUMN — the same span a collapsed row occupies, so
  * the two share an edge and the list has one left margin and one right margin.
  *
- * Both call sites (DefaultState, SubmittedState) render inside search.tsx's
- * ScrollView, whose content container carries `paddingHorizontal: padH`; this is
- * that column, stated as a number because the touch-derived origin rect needs one
+ * Its call sites (SubmittedState in search.tsx, FilmSlots in EntityScreen) each
+ * render inside a ScrollView whose content container carries the same horizontal
+ * padding; this is that column, stated as a number because the origin rect needs one
  * (see handlePress). Layout and rect therefore read the SAME value and cannot
  * disagree about how big the card is.
  *
@@ -86,7 +86,7 @@ export const ctaFor = (entityType: SearchEntityType): string => {
  * Every slot in an accordion list — the one swapping row↔card AND every row it
  * displaces — rides this same transition, which is what makes the open read as the
  * card pushing the list apart rather than several things moving near each other.
- * The mechanism (see the wrappers in DefaultState/SubmittedState): the slot is a
+ * The mechanism (see the wrappers in SubmittedState / FilmSlots): the slot is a
  * persistent clipped view whose FRAME animates between committed layouts on the UI
  * thread, so the full-size card is revealed top-down as the slot grows — an unroll
  * — while its content lays out exactly once. No per-frame Yoga, per the motion law.
