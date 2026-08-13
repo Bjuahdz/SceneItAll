@@ -438,12 +438,11 @@ export interface TranscriptSegment {
  *     `takes.entities` (TEXT), so a migration means parsing and rewriting every
  *     take's payload — work that can fail half-way and leave the table in two
  *     vocabularies at once, which is the exact state the seam existed to avoid.
- *   · NOTHING READS THE VALUE TODAY. Both consumers of stored entities
- *     (services/fingerprint.ts, services/onePick.ts) filter to person types —
- *     director, actor, composer — so collection mentions are written and never
- *     looked at. Paying migration risk for a value with no readers is a bad
- *     trade; a read-time map cannot half-apply and costs one pass over a
- *     handful of rows.
+ *   · NOTHING READS THE VALUE TODAY. The consumer of stored entities
+ *     (services/fingerprint.ts) filters to person types — director, actor,
+ *     composer — so collection mentions are written and never looked at. Paying
+ *     migration risk for a value with no readers is a bad trade; a read-time map
+ *     cannot half-apply and costs one pass over a handful of rows.
  *
  * The map lives in `parseTakeEntities` below — the single door every reader goes
  * through. Any future stored-vocabulary rename belongs there for the same reason.

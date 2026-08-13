@@ -32,16 +32,6 @@ export const PREF_SHOW_SHORTS = "person.showShorts";
 export const PREF_SHOW_DOCS = "person.showDocs";
 
 /**
- * The Search tab's resting state: the BENTO board, or the ledger it replaces.
- *
- * Defaults OFF so the surface Bryan already approved stays the shipping one while the
- * board is being built. Replacing a surface that works is exactly when an A/B beats a
- * leap — this exists so both can be compared on the same device, on the same history,
- * a second apart. Deleted at R8 along with the ledger.
- */
-export const PREF_BENTO_RECENTS = "search.bentoRecents";
-
-/**
  * Seed a fake search session (entities sampled from the REAL archive; count set by
  * PREF_DEMO_ARRIVAL_MAX below) every time the Search tab regains focus, so the arrival
  * choreography can be iterated without hand-searching eight things first. Dev
