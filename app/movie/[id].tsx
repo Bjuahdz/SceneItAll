@@ -63,6 +63,9 @@ import {
   ESCAPE_STEP_MS,
 } from '@/contexts/MovieSheetContext';
 import { EntityOverlayHost, EntityOverlayProvider, useEntityOverlay } from '@/contexts/EntityOverlayContext';
+import FilterSheet from '@/components/entity/FilterSheet';
+import SheetFilterPill from '@/components/entity/SheetFilterPill';
+import { isDefault } from '@/hooks/useFilterState';
 import type { EntityPage } from '@/services/entities';
 
 // The frost a stacked sheet pulls over this route's content — same construction
@@ -2134,13 +2137,37 @@ const MovieDetailsScreen = () => {
   // cannot drag Spider-Man out from under Tom Holland. Separate value from
   // dragLockSV on purpose — that one is WRITTEN by the details view (cinema /
   // artwork) and two absolute writers on one flag would fight.
-  const { isOpen: entityOpen, requestFold } = useEntityOverlay();
+  const {
+    isOpen: entityOpen,
+    requestFold,
+    filterOpen,
+    filterCovering,
+    openFilter,
+    closeFilter,
+    appliedFilter,
+    reading,
+  } = useEntityOverlay();
   const pageLockSV = useSharedValue(0);
   useEffect(() => {
     pageLockSV.value = entityOpen ? 1 : 0;
   }, [entityOpen, pageLockSV]);
   const entityOpenRef = useRef(entityOpen);
   entityOpenRef.current = entityOpen;
+  // ▸ THE PILL RIDES THE PAGE'S MOTION, not its mount. The overlay mounts
+  // several beats before the page visibly moves — it measures its origin and
+  // waits for that commit first — so raising the pill on `entityOpen` put it on
+  // screen while the page was still card-sized, arriving as a separate event
+  // (Bryan: "mistimed"). `onGrowStart` IS the grow's first motion frame and
+  // `onFoldStart` the frame a fold commits, which is exactly the pair the
+  // search screen hands its nav for the same reason. Any close that never
+  // folds — a no-origin page, the escape's silent close — is caught by the
+  // effect below, so the pill can never outlive the page.
+  const [pageMoving, setPageMoving] = useState(false);
+  useEffect(() => {
+    if (!entityOpen) setPageMoving(false);
+  }, [entityOpen]);
+  const onPageGrowStart = React.useCallback(() => setPageMoving(true), []);
+  const onPageFoldStart = React.useCallback(() => setPageMoving(false), []);
   const engaged = useSharedValue(0); //      1 while a finger is driving the sheet
   const engageTy = useSharedValue(0); //     pan translationY at the engage frame
   const engageP = useSharedValue(1); //      progress at the engage frame
@@ -2514,7 +2541,37 @@ const MovieDetailsScreen = () => {
           is tapped. Mid-escape the page rides its TRUE FOLD: this route feeds
           the exit fraction and the fold lifecycle through these wires, and the
           page folds home into its cast card across its own unit of the pull. */}
-      <EntityOverlayHost />
+      <EntityOverlayHost onGrowStart={onPageGrowStart} onFoldStart={onPageFoldStart} />
+
+      {/* ▸ THE FILTER PILL, and the sheet it opens — the one piece of the nav
+          that a sheet-borne entity page genuinely needs (Bryan, 2026-08-13).
+          The nav itself is in the tabs layout, under this route, so its pill is
+          unreachable from here; a filmography you cannot filter is the gap that
+          left. Destinations and the two discs stay gone — they mean nothing
+          three sheets deep — and the pill rises from below rather than morphing
+          out of a disc that is not there.
+
+          Both hang off THIS route's own EntityOverlayProvider, so they act on
+          the page this sheet is hosting and know nothing of the search tab's.
+          The sheet itself is mounted exactly as the search screen mounts it for
+          an open page — no rows, no applied, no onApply — which is what tells
+          it to read the open page's filmography straight from the context. */}
+      {/* Hidden for a READER for the same reason the nav hides for one: the
+          expanded biography fills the screen, and a control floating over a
+          column of prose is a mis-tap waiting to happen. The pill stays MOUNTED
+          through all of it and falls on its own clock, so it recedes with the
+          stage when a sheet stacks above rather than popping out of existence.
+          The SHEET does unmount there — it is closed whenever this route is
+          covered (its own surface is the only way to reach it), so the unmount
+          is unseen, and one idle filter instrument per stacked layer is a real
+          cost for something unreachable. It comes back as the cover clock
+          lands, which is the quietest frame available. */}
+      <SheetFilterPill
+        visible={pageMoving && !filterCovering && !reading}
+        filtered={!isDefault(appliedFilter)}
+        onPress={openFilter}
+      />
+      {entityOpen && !coveredUp && <FilterSheet open={filterOpen} onClose={closeFilter} />}
       </ReAnimated.View>
       </SheetLineageProvider>
 
