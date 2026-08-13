@@ -162,6 +162,8 @@ export default function EntityScreen({
   remeasureOrigin,
   onClose,
   onFoldStart,
+  onSwipeBegin,
+  onSwipeCancel,
   onGrowStart,
   onReadingChange,
   onFilmsChange,
@@ -217,6 +219,21 @@ export default function EntityScreen({
    * flight. Cancelled swipes never reach here — only a committed fold does.
    */
   onFoldStart?: () => void;
+  /**
+   * THE INTERACTIVE FOLD'S OWN CUES (sheet-borne pages only — the search
+   * screen deliberately does not subscribe). onFoldStart's contract above is
+   * "cancelled swipes never reach here", which the nav's choreography needs —
+   * but the sheet route's FILTER pill needs the opposite: it must leave the
+   * moment the page starts shrinking UNDER THE FINGER, not at release-commit
+   * (Bryan, 2026-08-13: the pill was still collapsing over the verbs island
+   * after the page had already gone — "the moment that the user is already
+   * minimizing it, we want the filter pill to completely go away").
+   * onSwipeBegin fires as the back-swipe engages a page that will actually
+   * fold (no-origin pages don't move under the drag, so they don't fire);
+   * onSwipeCancel fires when the released swipe springs the page back open.
+   */
+  onSwipeBegin?: () => void;
+  onSwipeCancel?: () => void;
   /**
    * The GROW'S FIRST MOTION FRAME — after the pre-flight measure beats, the
    * instant the page visibly starts expanding. No-grow pages fire it at mount.
@@ -514,6 +531,10 @@ export default function EntityScreen({
   const hasOrigin = Boolean(origin);
   const beginSwipe = useCallback(() => {
     if (!origin) return;
+    // The page is about to shrink under the finger — anything that must leave
+    // WITH it (the sheet route's FILTER pill) leaves from this frame, not from
+    // the release-commit. See onSwipeBegin's contract note above.
+    onSwipeBegin?.();
     // Strip the native compositing layers before the interactive fold, exactly as
     // the button fold does — a BlurView inside a transformed parent is the hazard.
     settledRef.current = false;
@@ -522,7 +543,7 @@ export default function EntityScreen({
     // scaled by (1 − p), so at the shallow start of a pull even a 200px correction
     // moves the window by a few pixels.
     refreshOrigin(() => {});
-  }, [origin, refreshOrigin]);
+  }, [origin, onSwipeBegin, refreshOrigin]);
   // JS landing pads for the gesture's worklet — release hands the motion to the
   // frame stepper, same engine as the button paths.
   // The swipe's commit point is the same cue as the chevron's: past the
@@ -531,10 +552,12 @@ export default function EntityScreen({
     onFoldStart?.();
     startMotion(0, FOLD_MS, goBack);
   }, [onFoldStart, startMotion, goBack]);
-  const cancelSwipe = useCallback(
-    () => startMotion(1, SNAP_MS, finishGrow),
-    [startMotion, finishGrow]
-  );
+  const cancelSwipe = useCallback(() => {
+    // The page is coming back — whatever left on onSwipeBegin comes back with
+    // it (the sheet pill blooms back in as the page re-seats).
+    onSwipeCancel?.();
+    startMotion(1, SNAP_MS, finishGrow);
+  }, [onSwipeCancel, startMotion, finishGrow]);
 
   const backSwipe = useMemo(
     () =>
