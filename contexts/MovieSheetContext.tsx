@@ -114,7 +114,10 @@ export const ESCAPE_TRAVEL = 140;
 
 /** THE TRACK — the chevron's path, drawn behind it: a vertical pill in a very
  *  subtle grey, faintly glassy. Its LENGTH is the whole readout, printed
- *  before the finger moves: this far, and you are out. */
+ *  before the finger moves: this far, and you are out. The width is ALSO the
+ *  RING's diameter (his 2026-08-13 ask — the standing invitation around the
+ *  chevron whenever the hold is armed): the resting circle IS the track's top
+ *  cap, which is what lets the hold read as the ring growing into the field. */
 export const ESCAPE_TRACK_W = 36;
 /** Half the width — the cap radius, and so the chevron's inset from each end.
  *  This is what makes the geometry exact: the glyph rides from the centre of
@@ -281,6 +284,33 @@ export const ESCAPE_STEP_MS = 230;
  *  whole gesture. */
 export const ESCAPE_UV_UNIFY = '#A78BFA';
 
+/** THE DISSOLVE — the commit's confirmation (his ask, 2026-08-13): released at
+ *  the foot, the pill ERODES bottom-to-top, shedding little ultraviolet bits
+ *  as it goes — the instrument's own material carrying the commit colour out,
+ *  instead of the old fade-in-place.
+ *
+ *  ▸ THE STILL BEAT (round 2 — "I honestly don't see any disintegration"): v1
+ *    ran the dissolve and the cascade on the same frame, and a 140ms erosion
+ *    in a corner cannot compete with a full-screen card slide — especially
+ *    when its opening act happens at the foot, under the very thumb that is
+ *    still lifting off it. So the cascade now waits ONE BREAK before its first
+ *    step: guards are up instantly (escaping flips on the release frame), but
+ *    the screen holds still while the pill visibly eats itself, and the tower
+ *    starts falling as the last bits fly. A confirmation you can see, then the
+ *    consequence. Zero this to restore the old simultaneous exit. */
+export const ESCAPE_CASCADE_LEAD_MS = ESCAPE_BREAK_MS;
+/** ▸ HARD BUDGET: the flourish must finish inside the route's OWN exit. The
+ *  committing route is always the cascade's first step — its card slides for
+ *  ESCAPE_STEP_MS, one lead after the release, and the route (instrument
+ *  included) unmounts right after — so the dissolve's total IS that sum; any
+ *  longer and the last bits would be cut off mid-air by the unmount. */
+export const ESCAPE_DISSOLVE_MS = ESCAPE_CASCADE_LEAD_MS + ESCAPE_STEP_MS;
+/** One freed bit's flight (pop at the eroding edge, drift, fade) — one break,
+ *  the instrument's own tempo. The erosion runs the remainder of the budget
+ *  (exactly one step), so edge and bits share one linear clock and the last
+ *  bit dies just before the unmount. */
+export const ESCAPE_DISSOLVE_BIT_MS = ESCAPE_BREAK_MS;
+
 /** Release at or past this much of the pull commits the drop; anything less
  *  rides home. Hysteresis against the arm (armed at ~1.0, disarmed below
  *  this), so the boundary can't flutter under a resting finger. */
@@ -438,6 +468,12 @@ export function MovieSheetProvider({ children }: { children: React.ReactNode }) 
         const steps = [...stepsRef.current].reverse();
         const ground = groundInChainRef.current ? groundRef.current : null;
         (async () => {
+          // THE STILL BEAT — see ESCAPE_CASCADE_LEAD_MS. The guards are
+          // already up (escaping flipped above, on the release frame), so
+          // nothing can navigate into the pause; the screen simply holds
+          // while the instrument's dissolve plays, and the tower starts
+          // falling as the last bits fly.
+          await new Promise((r) => setTimeout(r, ESCAPE_CASCADE_LEAD_MS));
           for (const step of steps) await step();
           // ...and then the ground puts its own layer away, so the unwind ends
           // on the tab you came in from however the chain began.
